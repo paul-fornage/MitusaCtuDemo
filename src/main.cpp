@@ -70,7 +70,8 @@ enum class State : u16{
     WAIT_FOR_RETURN_TO_START,
     MANUAL_GO_TO_POSITION,
     MANUAL_GO_TO_POSITION_WAIT,
-    JOB_NEXT_POSITION,
+    JOB_CALC_NEXT_POSITION,
+    JOB_MOVE_NEXT_POSITION,
     JOB_WAIT_POSITION,
     JOB_WAIT_DELAY,
     ESTOP_START,
@@ -84,7 +85,10 @@ u32 last_estop_time = 0;
 auto last_state_before_estop = State::IDLE;
 static constexpr u32 ESTOP_DEACTIVATE_COOLDOWN_MS = 1000;
 u16 manual_target_pos_index = 65535; // 65535 always out of bounds
-u16 cycle_current_index = 0;
+u16 cycle_last_index = 0; // gets set to `cycle_target_index` after reaching target and waiting delay
+u16 cycle_target_index = 0; // gets set to the next valid target position at start of cycle
+u32 cycle_reached_target_time = 0; // `millis()` at the instant the carriage reached the target pos
+u32 millis_delay = 0; // `millis()` at the instant the carriage reached the target pos
 
 ModBussy mb(502, coils, discretes, holding, input);
 
@@ -156,7 +160,7 @@ int main() {
         mb.Coil(AT_START_OFFSET, CARRIAGE_MOTOR.PositionRefCommanded() == START_POS_STEPS);
         mb.Coil(JOB_ACTIVE_OFFSET,
             machine_state == State::JOB_WAIT_DELAY
-            || machine_state == State::JOB_NEXT_POSITION
+            || machine_state == State::JOB_CALC_NEXT_POSITION
             || machine_state == State::JOB_WAIT_POSITION);
 
         const u16 speed = mb.Hreg(SPEED_OFFSET);
@@ -167,7 +171,7 @@ int main() {
         stop_cycle_latched = latch_handler(STOP_CYCLE_LATCH_OFFSET);
         go_to_position_latched = latch_handler(GO_TO_POSITION_LATCH_OFFSET);
 
-        mb.Hreg(CURRENT_POSITION_INDEX_OFFSET) = cycle_current_index;
+        mb.Hreg(CURRENT_POSITION_INDEX_OFFSET) = cycle_target_index;
         mb.Hreg(CURRENT_POSITION_OFFSET) = CARRIAGE_MOTOR.PositionRefCommanded();
 
         if (!ESTOP_SAFE && !in_estop) {
@@ -214,7 +218,7 @@ State state_machine_iter(const State state_in) {
             if (start_cycle_latched) {
                 if (is_homed) {
                     PRINTLN("starting cycle");
-                    return State::JOB_NEXT_POSITION;
+                    return State::JOB_CALC_NEXT_POSITION;
                 } else {
                     PRINTLN("Can't start job, not homed");
                     return State::IDLE;
@@ -302,12 +306,31 @@ State state_machine_iter(const State state_in) {
                 return State::ESTOP_START;
             }
         }
-        case State::JOB_NEXT_POSITION: {
-            if (cycle_current_index >= NUM_POSITIONS) {
-                PRINTLN("Cycle index out of bounds");
-                return State::ERROR_STATE;
+        case State::JOB_CALC_NEXT_POSITION: {
+            u16 next_target_index = cycle_last_index + 1;
+            for (u16 i = 0; i < NUM_POSITIONS; i++) {
+                if (mb.Coil(ENABLED_POSITIONS_OFFSET + next_target_index)) {
+                    break;
+                }
+                next_target_index = (next_target_index + 1) % NUM_POSITIONS;
             }
-            const u16 target_hundreths = mb.Hreg(POSITIONS_OFFSET + cycle_current_index);
+            if (next_target_index == cycle_last_index) {
+                PRINTLN("No enabled positions left");
+                return State::IDLE;
+            }
+            cycle_target_index = next_target_index;
+
+            PRINT("Calculated next position index: ");
+            PRINTLN(cycle_target_index);
+
+            return State::JOB_MOVE_NEXT_POSITION;
+        }
+
+        case State::JOB_MOVE_NEXT_POSITION: {
+            PRINT("Going to position at index ");
+            PRINTLN(cycle_target_index);
+
+            const u16 target_hundreths = mb.Hreg(POSITIONS_OFFSET + cycle_target_index);
             const i32 target_steps = target_hundreths * STEPS_PER_HUNDRETH;
 
             if (target_steps > MOTOR_MAX_STEPS) {
@@ -318,17 +341,30 @@ State state_machine_iter(const State state_in) {
             CARRIAGE_MOTOR.Move(target_steps, StepGenerator::MOVE_TARGET_ABSOLUTE);
             return State::JOB_WAIT_POSITION;
         }
+
         case State::JOB_WAIT_POSITION: {
             if (CARRIAGE_MOTOR.HlfbState() == MotorDriver::HLFB_ASSERTED && CARRIAGE_MOTOR.StepsComplete()) {
                 PRINT("Motor reached position ");
-                PRINTLN(cycle_current_index);
-                cycle_current_index++;
-                return State::JOB_NEXT_POSITION;
+                PRINTLN(cycle_target_index);
+                cycle_reached_target_time = millis();
+                millis_delay = mb.Hreg(POSITIONS_OFFSET + cycle_target_index) * 100;
+                return State::JOB_WAIT_DELAY;
             }
             if (CARRIAGE_MOTOR.StatusReg().bit.AlertsPresent) {
                 PRINTLN("Motor alert during homing");
                 print_motor_alerts();
+                estop();
+                return State::ESTOP_START;
             }
+        }
+
+
+        case State::JOB_WAIT_DELAY: {
+            const u32 time_waited = millis() - cycle_reached_target_time;
+            if (time_waited < millis_delay) {
+                return State::JOB_WAIT_DELAY;
+            }
+            return State::JOB_CALC_NEXT_POSITION;
         }
 
 
@@ -474,6 +510,7 @@ void print_motor_alerts(){
 }
 
 
+
 void print_state(const State state_in) {
     switch (state_in) {
         case State::IDLE:
@@ -485,14 +522,23 @@ void print_state(const State state_in) {
         case State::WAIT_FOR_HOMING:
             PRINT("WAIT_FOR_HOMING");
             break;
-        case State::PREP_JOB:
-            PRINT("PREP_JOB");
+        case State::MANUAL_GO_TO_POSITION:
+            PRINT("MANUAL_GO_TO_POSITION");
             break;
-        case State::START_JOB:
-            PRINT("START_JOB");
+        case State::MANUAL_GO_TO_POSITION_WAIT:
+            PRINT("MANUAL_GO_TO_POSITION_WAIT");
             break;
-        case State::RUNNING_JOB:
-            PRINT("RUNNING_JOB");
+        case State::JOB_CALC_NEXT_POSITION:
+            PRINT("JOB_CALC_NEXT_POSITION");
+            break;
+        case State::JOB_MOVE_NEXT_POSITION:
+            PRINT("JOB_MOVE_NEXT_POSITION");
+            break;
+        case State::JOB_WAIT_POSITION:
+            PRINT("JOB_WAIT_POSITION");
+            break;
+        case State::JOB_WAIT_DELAY:
+            PRINT("JOB_WAIT_DELAY");
             break;
         case State::ESTOP_START:
             PRINT("ESTOP_START");
@@ -515,21 +561,25 @@ void print_state(const State state_in) {
 State estop_resume_state(const State state_in) {
     switch (state_in) {
         case State::IDLE:
+            break;
         case State::START_HOMING:
         case State::WAIT_FOR_HOMING:
             return State::IDLE;
-        case State::PREP_JOB:
-            return State::PREP_JOB;
-        case State::START_JOB:
-        case State::RUNNING_JOB:
-            return State::START_JOB;
-        case State::ESTOP_START:
-        case State::ESTOP:
-            // state was in estop before estop called??
-            return State::ERROR_STATE;
         case State::RETURN_TO_START:
         case State::WAIT_FOR_RETURN_TO_START:
             return State::RETURN_TO_START;
+        case State::MANUAL_GO_TO_POSITION:
+        case State::MANUAL_GO_TO_POSITION_WAIT:
+            return State::MANUAL_GO_TO_POSITION;
+        case State::JOB_CALC_NEXT_POSITION:
+            return State::JOB_CALC_NEXT_POSITION;
+        case State::JOB_MOVE_NEXT_POSITION:
+        case State::JOB_WAIT_POSITION:
+            return State::JOB_MOVE_NEXT_POSITION;
+        case State::JOB_WAIT_DELAY:
+            return State::JOB_WAIT_DELAY;
+        case State::ESTOP_START:
+        case State::ESTOP:
         case State::ERROR_STATE:
             return State::ERROR_STATE;
     }
