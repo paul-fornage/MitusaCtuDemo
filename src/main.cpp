@@ -41,7 +41,7 @@ static constexpr u16 DELAYS_OFFSET = POSITIONS_OFFSET + NUM_POSITIONS;
 static constexpr u16 START_CYCLE_LATCH_OFFSET = 10;
 static constexpr u16 HOME_LATCH_OFFSET = 11;
 static constexpr u16 IS_HOMED_OFFSET = 12;
-static constexpr u16 AT_START_OFFSET = 13;
+
 static constexpr u16 GO_TO_POSITION_LATCH_OFFSET = 14;
 static constexpr u16 JOB_ACTIVE_OFFSET = 15;
 static constexpr u16 STOP_CYCLE_LATCH_OFFSET = 16;
@@ -103,11 +103,8 @@ bool latch_handler(u16 offset);
 auto machine_state = State::IDLE;
 auto last_state = State::IDLE;
 
-// Length to weld in hundreths of an inch
-u16 length = 0;
 // Speed to weld in hundreths of an inch per second
 u16 speed = 0;
-i32 job_target_pos_steps = START_POS_STEPS;
 
 
 
@@ -129,7 +126,6 @@ int main() {
     mb.Coil(START_CYCLE_LATCH_OFFSET, false);
     mb.Coil(HOME_LATCH_OFFSET, false);
     mb.Coil(GO_TO_POSITION_LATCH_OFFSET, false);
-    mb.Coil(AT_START_OFFSET, false);
     mb.Coil(JOB_ACTIVE_OFFSET, false);
 
     MotorMgr.MotorInputClocking(MotorManager::CLOCK_RATE_NORMAL);
@@ -141,23 +137,15 @@ int main() {
     CARRIAGE_MOTOR.AccelMax(15000);
     CARRIAGE_MOTOR.VelMax(5000);
 
-    NvmManager::Instance().BlockRead(NvmManager::NVM_LOC_USER_START, (sizeof nv_ram), &nv_ram[0]);
-    length = nv_ram[0]<<8 | nv_ram[1];
-    speed = nv_ram[2]<<8 | nv_ram[3];
-    PRINTLN("readed length and speed from NVM.");
-    PRINT("length: ");
-    PRINT(length);
-    PRINT(" | speed: ");
-    PRINTLN(speed);
 
-    mb.Hreg(SPEED_OFFSET) = speed;
+
+    mb.Hreg(SPEED_OFFSET) = 100;
 
     while (true) {
         mb.task();
         mb.Coil(IS_HOMED_OFFSET, is_homed);
         mb.Coil(IN_ESTOP_OFFSET, in_estop);
         mb.Coil(ERROR_OFFSET, machine_state == State::ERROR_STATE);
-        mb.Coil(AT_START_OFFSET, CARRIAGE_MOTOR.PositionRefCommanded() == START_POS_STEPS);
         mb.Coil(JOB_ACTIVE_OFFSET,
             machine_state == State::JOB_WAIT_DELAY
             || machine_state == State::JOB_CALC_NEXT_POSITION
@@ -202,13 +190,6 @@ State state_machine_iter(const State state_in) {
         case State::IDLE: {
             if (go_to_position_latched) {
                 if (is_homed) {
-                    manual_target_pos_index = mb.Hreg(SELECTED_POSITION_OFFSET);
-                    PRINT("going to position ");
-                    PRINTLN(manual_target_pos_index);
-                    if (manual_target_pos_index >= NUM_POSITIONS) {
-                        PRINTLN("Position index out of bounds.");
-                        return State::IDLE;
-                    }
                     return State::MANUAL_GO_TO_POSITION;
                 } else {
                     PRINTLN("Can't return to start, not homed");
@@ -285,8 +266,19 @@ State state_machine_iter(const State state_in) {
             return State::WAIT_FOR_RETURN_TO_START;
         }
         case State::MANUAL_GO_TO_POSITION: {
-            const u16 target_hundreths = manual_target_pos_index;
+            manual_target_pos_index = mb.Hreg(SELECTED_POSITION_OFFSET);
+            PRINT("going to position index ");
+            PRINTLN(manual_target_pos_index);
+            if (manual_target_pos_index >= NUM_POSITIONS) {
+                PRINTLN("Position index out of bounds.");
+                return State::IDLE;
+            }
+            const u16 target_hundreths = mb.Hreg(POSITIONS_OFFSET + manual_target_pos_index);
+            PRINT("position in hundreths: ");
+            PRINTLN(target_hundreths);
             const i32 target_steps = target_hundreths * STEPS_PER_HUNDRETH;
+            PRINT("position in steps: ");
+            PRINTLN(target_steps);
             if (target_steps > MOTOR_MAX_STEPS) {
                 PRINTLN("Target position too far for manual move");
                 return State::ERROR_STATE;
@@ -305,6 +297,7 @@ State state_machine_iter(const State state_in) {
                 estop();
                 return State::ESTOP_START;
             }
+            return State::MANUAL_GO_TO_POSITION_WAIT;
         }
         case State::JOB_CALC_NEXT_POSITION: {
             u16 next_target_index = cycle_last_index + 1;
@@ -356,6 +349,7 @@ State state_machine_iter(const State state_in) {
                 estop();
                 return State::ESTOP_START;
             }
+            return State::JOB_WAIT_POSITION;
         }
 
 
