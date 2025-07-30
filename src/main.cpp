@@ -34,6 +34,7 @@ static constexpr u16 SELECTED_POSITION_OFFSET = 10; // position to go to when GO
 static constexpr u16 CURRENT_POSITION_INDEX_OFFSET = 11;
 static constexpr u16 SPEED_OFFSET = 12;
 static constexpr u16 CURRENT_POSITION_OFFSET = 13;
+static constexpr u16 MACHINE_STATE_OFFSET = 14;
 static constexpr u16 POSITIONS_OFFSET = 16;
 static constexpr u16 DELAYS_OFFSET = POSITIONS_OFFSET + NUM_POSITIONS;
 
@@ -41,7 +42,7 @@ static constexpr u16 DELAYS_OFFSET = POSITIONS_OFFSET + NUM_POSITIONS;
 static constexpr u16 START_CYCLE_LATCH_OFFSET = 10;
 static constexpr u16 HOME_LATCH_OFFSET = 11;
 static constexpr u16 IS_HOMED_OFFSET = 12;
-
+static constexpr u16 RESET_CYCLE_LATCH_OFFSET = 13;
 static constexpr u16 GO_TO_POSITION_LATCH_OFFSET = 14;
 static constexpr u16 JOB_ACTIVE_OFFSET = 15;
 static constexpr u16 STOP_CYCLE_LATCH_OFFSET = 16;
@@ -53,7 +54,7 @@ bool home_latched = false;
 bool start_cycle_latched = false;
 bool stop_cycle_latched = false;
 bool go_to_position_latched = false;
-
+bool reset_cycle_latched = false;
 
 u16 coils[(MB_COIL_BITS + 15) / 16];
 u16 discretes[(MB_DISCRETE_BITS + 15) / 16];
@@ -71,9 +72,9 @@ enum class State : u16{
     MANUAL_GO_TO_POSITION,
     MANUAL_GO_TO_POSITION_WAIT,
     JOB_CALC_NEXT_POSITION,
-    JOB_MOVE_NEXT_POSITION,
-    JOB_WAIT_POSITION,
-    JOB_WAIT_DELAY,
+    JOB_MOVE_NEXT_POSITION = 16,
+    JOB_WAIT_POSITION = 17,
+    JOB_WAIT_DELAY = 18,
     ESTOP_START,
     ESTOP,
     ERROR_STATE, // unrecoverable by design
@@ -81,6 +82,7 @@ enum class State : u16{
 
 bool is_homed = false;
 bool in_estop = false;
+bool is_cycle_reset = true; // should the next position calculation return the first enabled position?
 u32 last_estop_time = 0;
 auto last_state_before_estop = State::IDLE;
 static constexpr u32 ESTOP_DEACTIVATE_COOLDOWN_MS = 1000;
@@ -106,7 +108,9 @@ auto last_state = State::IDLE;
 // Speed to weld in hundreths of an inch per second
 u16 speed = 0;
 
-
+// TODO: pause and cancel cycles
+// TODO: indicate moving towards vs waiting
+// TODO: delay count paused in ESTOP
 
 int main() {
     ESTOP_CONNECTOR.Mode(Connector::INPUT_DIGITAL);
@@ -127,6 +131,7 @@ int main() {
     mb.Coil(HOME_LATCH_OFFSET, false);
     mb.Coil(GO_TO_POSITION_LATCH_OFFSET, false);
     mb.Coil(JOB_ACTIVE_OFFSET, false);
+    mb.Coil(STOP_CYCLE_LATCH_OFFSET, false);
 
     MotorMgr.MotorInputClocking(MotorManager::CLOCK_RATE_NORMAL);
     MotorMgr.MotorModeSet(MotorManager::MOTOR_ALL, Connector::CPM_MODE_STEP_AND_DIR);
@@ -150,6 +155,15 @@ int main() {
             machine_state == State::JOB_WAIT_DELAY
             || machine_state == State::JOB_CALC_NEXT_POSITION
             || machine_state == State::JOB_WAIT_POSITION);
+        mb.Hreg(MACHINE_STATE_OFFSET) = static_cast<u16>(machine_state);
+        mb.Hreg(CURRENT_POSITION_INDEX_OFFSET) = cycle_target_index;
+        if (is_homed) {
+            mb.Hreg(CURRENT_POSITION_OFFSET) = CARRIAGE_MOTOR.PositionRefCommanded();
+        } else {
+            mb.Hreg(CURRENT_POSITION_OFFSET) = 0;
+        }
+
+
 
         const u16 speed = mb.Hreg(SPEED_OFFSET);
         CARRIAGE_MOTOR.VelMax(speed * STEPS_PER_HUNDRETH);
@@ -158,6 +172,7 @@ int main() {
         start_cycle_latched = latch_handler(START_CYCLE_LATCH_OFFSET);
         stop_cycle_latched = latch_handler(STOP_CYCLE_LATCH_OFFSET);
         go_to_position_latched = latch_handler(GO_TO_POSITION_LATCH_OFFSET);
+        reset_cycle_latched = latch_handler(RESET_CYCLE_LATCH_OFFSET);
 
         mb.Hreg(CURRENT_POSITION_INDEX_OFFSET) = cycle_target_index;
         mb.Hreg(CURRENT_POSITION_OFFSET) = CARRIAGE_MOTOR.PositionRefCommanded();
@@ -205,7 +220,11 @@ State state_machine_iter(const State state_in) {
                     return State::IDLE;
                 }
             }
-
+            if(reset_cycle_latched) {
+                is_cycle_reset = true;
+                PRINTLN("Cycle reset");
+                return State::IDLE;
+            }
             if (home_latched) {
                 PRINTLN("Homing");
 
@@ -300,12 +319,29 @@ State state_machine_iter(const State state_in) {
             return State::MANUAL_GO_TO_POSITION_WAIT;
         }
         case State::JOB_CALC_NEXT_POSITION: {
-            u16 next_target_index = cycle_last_index + 1;
+
+            if (is_cycle_reset) {
+                for (u16 i = 0; i < NUM_POSITIONS; i++) {
+                    if (mb.Coil(ENABLED_POSITIONS_OFFSET + i)) {
+                        cycle_target_index = i;
+                        is_cycle_reset = false;
+                        PRINT("Reset cycle mode, found first en pos: ");
+                        PRINTLN(cycle_target_index);
+                        return State::JOB_MOVE_NEXT_POSITION;
+                    }
+                }
+                PRINTLN("No enabled positions left");
+                return State::IDLE;
+            }
+
+            u16 next_target_index = cycle_last_index;
+
             for (u16 i = 0; i < NUM_POSITIONS; i++) {
+                next_target_index = (next_target_index + 1) % NUM_POSITIONS;
+
                 if (mb.Coil(ENABLED_POSITIONS_OFFSET + next_target_index)) {
                     break;
                 }
-                next_target_index = (next_target_index + 1) % NUM_POSITIONS;
             }
             if (next_target_index == cycle_last_index) {
                 PRINTLN("No enabled positions left");
@@ -340,7 +376,12 @@ State state_machine_iter(const State state_in) {
                 PRINT("Motor reached position ");
                 PRINTLN(cycle_target_index);
                 cycle_reached_target_time = millis();
-                millis_delay = mb.Hreg(POSITIONS_OFFSET + cycle_target_index) * 100;
+                const u16 delay_ds = mb.Hreg(DELAYS_OFFSET + cycle_target_index);
+                PRINT("raw delay (deciseconds): ");
+                PRINTLN(cycle_target_index);
+                millis_delay = delay_ds * 100;
+                PRINT("delay (milliseconds): ");
+                PRINTLN(millis_delay);
                 return State::JOB_WAIT_DELAY;
             }
             if (CARRIAGE_MOTOR.StatusReg().bit.AlertsPresent) {
@@ -355,10 +396,11 @@ State state_machine_iter(const State state_in) {
 
         case State::JOB_WAIT_DELAY: {
             const u32 time_waited = millis() - cycle_reached_target_time;
-            if (time_waited < millis_delay) {
-                return State::JOB_WAIT_DELAY;
+            if (time_waited >= millis_delay) {
+                cycle_last_index = cycle_target_index;
+                return State::JOB_CALC_NEXT_POSITION;
             }
-            return State::JOB_CALC_NEXT_POSITION;
+            return State::JOB_WAIT_DELAY;
         }
 
 
