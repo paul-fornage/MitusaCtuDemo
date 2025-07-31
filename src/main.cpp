@@ -27,6 +27,9 @@
 #define ESTOP_CON_SAFE_STATE true
 #define ESTOP_SAFE (ESTOP_CONNECTOR.State() == ESTOP_CON_SAFE_STATE)
 
+/// Interrupt priority for the periodic interrupt. 0 is highest priority, 7 is lowest.
+#define PERIODIC_INTERRUPT_PRIORITY 5
+
 #define IP_ADDRESS 192,168,1,61
 #define USE_DHCP false
 
@@ -38,6 +41,7 @@ static constexpr u16 CURRENT_POSITION_INDEX_OFFSET = 11;
 static constexpr u16 SPEED_OFFSET = 12;
 static constexpr u16 CURRENT_POSITION_OFFSET = 13;
 static constexpr u16 MACHINE_STATE_OFFSET = 14;
+static constexpr u16 DELAY_REMAINING_OFFSET = 15;
 static constexpr u16 POSITIONS_OFFSET = 16;
 static constexpr u16 DELAYS_OFFSET = POSITIONS_OFFSET + NUM_POSITIONS;
 
@@ -51,15 +55,19 @@ static constexpr u16 JOB_ACTIVE_OFFSET = 15;
 static constexpr u16 STOP_CYCLE_LATCH_OFFSET = 16;
 static constexpr u16 JOB_MOVING_OFFSET = 17;
 static constexpr u16 JOB_WAITING_OFFSET = 18;
+// static constexpr u16 PAUSE_CYCLE_LATCH_OFFSET = 19;
 static constexpr u16 IN_ESTOP_OFFSET = 20;
 static constexpr u16 ERROR_OFFSET = 21;
 static constexpr u16 ENABLED_POSITIONS_OFFSET = 32;
+
+volatile u32 delay_countdown = 0;
 
 bool home_latched = false;
 bool start_cycle_latched = false;
 bool stop_cycle_latched = false;
 bool go_to_position_latched = false;
 bool reset_cycle_latched = false;
+bool pause_cycle_latched = false;
 
 u16 coils[(MB_COIL_BITS + 15) / 16];
 u16 discretes[(MB_DISCRETE_BITS + 15) / 16];
@@ -106,8 +114,12 @@ void estop();
 void print_state(State state_in);
 State estop_resume_state(State state_in);
 bool latch_handler(u16 offset);
+void ConfigurePeriodicInterrupt(uint32_t frequencyHz);
 
-auto machine_state = State::IDLE;
+extern "C" void TCC2_0_Handler(void) __attribute__((
+            alias("PeriodicInterrupt")));
+
+volatile auto machine_state = State::IDLE;
 auto last_state = State::IDLE;
 
 // Speed to weld in hundreths of an inch per second
@@ -115,7 +127,6 @@ u16 speed = 0;
 
 // TODO: pause and cancel cycles
 
-// TODO: delay count paused in ESTOP
 
 int main() {
     ESTOP_CONNECTOR.Mode(Connector::INPUT_DIGITAL);
@@ -127,6 +138,8 @@ int main() {
     if (ConnectorUsb.PortIsOpen()) {
         PRINTLN("USB connected");
     }
+
+    ConfigurePeriodicInterrupt(1000);
 
     ethernet_setup(USE_DHCP, IPAddress(IP_ADDRESS), 1);
     mb.begin();
@@ -169,6 +182,7 @@ int main() {
 
         mb.Hreg(MACHINE_STATE_OFFSET) = static_cast<u16>(machine_state);
         mb.Hreg(CURRENT_POSITION_INDEX_OFFSET) = cycle_target_index;
+        mb.Hreg(DELAY_REMAINING_OFFSET) = static_cast<u16>(delay_countdown/100);
         if (is_homed) {
             mb.Hreg(CURRENT_POSITION_OFFSET) = CARRIAGE_MOTOR.PositionRefCommanded();
         } else {
@@ -340,6 +354,11 @@ State state_machine_iter(const State state_in) {
         }
         case State::JOB_CALC_NEXT_POSITION: {
 
+            if (stop_cycle_latched) {
+                PRINTLN("Stopping cycle");
+                return State::IDLE;
+            }
+
             if (is_cycle_reset) {
                 for (u16 i = 0; i < NUM_POSITIONS; i++) {
                     if (mb.Coil(ENABLED_POSITIONS_OFFSET + i)) {
@@ -376,6 +395,12 @@ State state_machine_iter(const State state_in) {
         }
 
         case State::JOB_MOVE_NEXT_POSITION: {
+
+            if (stop_cycle_latched) {
+                PRINTLN("Stopping cycle");
+                return State::IDLE;
+            }
+
             PRINT("Going to position at index ");
             PRINTLN(cycle_target_index);
 
@@ -392,16 +417,23 @@ State state_machine_iter(const State state_in) {
         }
 
         case State::JOB_WAIT_POSITION: {
+
+            if (stop_cycle_latched) {
+                CARRIAGE_MOTOR.MoveStopAbrupt();
+                PRINTLN("Stopping cycle");
+                return State::IDLE;
+            }
+
             if (CARRIAGE_MOTOR.HlfbState() == MotorDriver::HLFB_ASSERTED && CARRIAGE_MOTOR.StepsComplete()) {
                 PRINT("Motor reached position ");
                 PRINTLN(cycle_target_index);
-                cycle_reached_target_time = millis();
                 const u16 delay_ds = mb.Hreg(DELAYS_OFFSET + cycle_target_index);
                 PRINT("raw delay (deciseconds): ");
                 PRINTLN(cycle_target_index);
                 millis_delay = delay_ds * 100;
                 PRINT("delay (milliseconds): ");
                 PRINTLN(millis_delay);
+                delay_countdown = millis_delay;
                 return State::JOB_WAIT_DELAY;
             }
             if (CARRIAGE_MOTOR.StatusReg().bit.AlertsPresent) {
@@ -415,8 +447,11 @@ State state_machine_iter(const State state_in) {
 
 
         case State::JOB_WAIT_DELAY: {
-            const u32 time_waited = millis() - cycle_reached_target_time;
-            if (time_waited >= millis_delay) {
+            if (stop_cycle_latched) {
+                PRINTLN("Stopping cycle");
+                return State::IDLE;
+            }
+            if (delay_countdown == 0) {
                 cycle_last_index = cycle_target_index;
                 return State::JOB_CALC_NEXT_POSITION;
             }
@@ -461,6 +496,19 @@ State state_machine_iter(const State state_in) {
         }
     }
     return State::IDLE;
+}
+
+/**
+ * Interrupt handler gets automatically called every ms
+ */
+extern "C" void PeriodicInterrupt(void) {
+    if (machine_state == State::JOB_WAIT_DELAY) {
+        if (delay_countdown > 0) {
+            delay_countdown--;
+        }
+    }
+    // Acknowledge the interrupt to clear the flag and wait for the next interrupt.
+    TCC2->INTFLAG.reg = TCC_INTFLAG_MASK; // This is critical
 }
 
 bool latch_handler(const u16 offset) {
@@ -655,4 +703,74 @@ State estop_resume_state(const State state_in) {
             return State::ERROR_STATE;
     }
     return State::ERROR_STATE;
+}
+
+
+/**
+ * Only used to configure the ms interrupt.
+ * Should only be called once other IO is configured.
+ * If you are confused, don't worry, this won't make sense without knowing the
+ * internal architecture of the hardware. It was stolen from
+ * https://teknic-inc.github.io/ClearCore-library/_periodic_interrupt_8cpp-example.html
+ *
+ * @param frequencyHz
+ */
+void ConfigurePeriodicInterrupt(const uint32_t frequencyHz) {
+    // Enable the TCC2 peripheral.
+    // TCC2 and TCC3 share their clock configuration and they
+    // are already configured to be clocked at 120 MHz from GCLK0.
+    CLOCK_ENABLE(APBCMASK, TCC2_);
+
+    // Disable TCC2.
+    TCC2->CTRLA.bit.ENABLE = 0;
+    SYNCBUSY_WAIT(TCC2, TCC_SYNCBUSY_ENABLE);
+
+    // Reset the TCC module so we know we are starting from a clean state.
+    TCC2->CTRLA.bit.SWRST = 1;
+    while (TCC2->CTRLA.bit.SWRST) {}
+
+    // If the frequency requested is zero, disable the interrupt and bail out.
+    if (!frequencyHz) {
+        NVIC_DisableIRQ(TCC2_0_IRQn);
+        return;
+    }
+
+    // Determine the clock prescaler and period value needed to achieve the
+    // requested frequency.
+    uint32_t period = (CPU_CLK + frequencyHz / 2) / frequencyHz;
+    uint8_t prescale;
+    // Make sure period is >= 1.
+    period = max(period, 1U);
+
+    // Prescale values 0-4 map to prescale divisors of 1-16,
+    // dividing by 2 each increment.
+    for (prescale = TCC_CTRLA_PRESCALER_DIV1_Val;
+            prescale < TCC_CTRLA_PRESCALER_DIV16_Val && (period - 1) > UINT16_MAX;
+            prescale++) {
+        period = period >> 1;
+    }
+    // Prescale values 5-7 map to prescale divisors of 64-1024,
+    // dividing by 4 each increment.
+    for (; prescale < TCC_CTRLA_PRESCALER_DIV1024_Val && (period - 1) > UINT16_MAX;
+            prescale++) {
+        period = period >> 2;
+    }
+    // If we have maxed out the prescaler and the period is still too big,
+    // use the maximum period. This results in a ~1.788 Hz interrupt.
+    if (period > UINT16_MAX) {
+        TCC2->PER.reg = UINT16_MAX;
+    }
+    else {
+        TCC2->PER.reg = period - 1;
+    }
+    TCC2->CTRLA.bit.PRESCALER = prescale;
+
+    // Interrupt every period on counter overflow.
+    TCC2->INTENSET.bit.OVF = 1;
+    // Enable TCC2.
+    TCC2->CTRLA.bit.ENABLE = 1;
+
+    // Set the interrupt priority and enable it.
+    NVIC_SetPriority(TCC2_0_IRQn, PERIODIC_INTERRUPT_PRIORITY);
+    NVIC_EnableIRQ(TCC2_0_IRQn);
 }
