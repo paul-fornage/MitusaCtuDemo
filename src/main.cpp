@@ -55,7 +55,7 @@ static constexpr u16 JOB_ACTIVE_OFFSET = 15;
 static constexpr u16 STOP_CYCLE_LATCH_OFFSET = 16;
 static constexpr u16 JOB_MOVING_OFFSET = 17;
 static constexpr u16 JOB_WAITING_OFFSET = 18;
-// static constexpr u16 PAUSE_CYCLE_LATCH_OFFSET = 19;
+static constexpr u16 SET_ESTOP_OFFSET = 19;
 static constexpr u16 IN_ESTOP_OFFSET = 20;
 static constexpr u16 ERROR_OFFSET = 21;
 static constexpr u16 ENABLED_POSITIONS_OFFSET = 32;
@@ -96,6 +96,7 @@ enum class State : u16{
 bool is_homed = false;
 bool in_estop = false;
 bool is_cycle_reset = true; // should the next position calculation return the first enabled position?
+bool hmi_commands_estop = false;
 u32 last_estop_time = 0;
 auto last_state_before_estop = State::IDLE;
 static constexpr u32 ESTOP_DEACTIVATE_COOLDOWN_MS = 1000;
@@ -154,6 +155,7 @@ int main() {
     mb.Coil(ERROR_OFFSET, false);
     mb.Coil(JOB_MOVING_OFFSET, false);
     mb.Coil(JOB_WAITING_OFFSET, false);
+    mb.Coil(SET_ESTOP_OFFSET, false);
 
     MotorMgr.MotorInputClocking(MotorManager::CLOCK_RATE_NORMAL);
     MotorMgr.MotorModeSet(MotorManager::MOTOR_ALL, Connector::CPM_MODE_STEP_AND_DIR);
@@ -184,11 +186,12 @@ int main() {
         mb.Hreg(CURRENT_POSITION_INDEX_OFFSET) = cycle_target_index;
         mb.Hreg(DELAY_REMAINING_OFFSET) = static_cast<u16>(delay_countdown/100);
         if (is_homed) {
-            mb.Hreg(CURRENT_POSITION_OFFSET) = CARRIAGE_MOTOR.PositionRefCommanded();
+            mb.Hreg(CURRENT_POSITION_OFFSET) = CARRIAGE_MOTOR.PositionRefCommanded() / STEPS_PER_HUNDRETH;
         } else {
             mb.Hreg(CURRENT_POSITION_OFFSET) = 0;
         }
 
+        hmi_commands_estop = mb.Coil(SET_ESTOP_OFFSET);
 
 
         const u16 speed = mb.Hreg(SPEED_OFFSET);
@@ -201,9 +204,14 @@ int main() {
         reset_cycle_latched = latch_handler(RESET_CYCLE_LATCH_OFFSET);
 
         mb.Hreg(CURRENT_POSITION_INDEX_OFFSET) = cycle_target_index;
-        mb.Hreg(CURRENT_POSITION_OFFSET) = CARRIAGE_MOTOR.PositionRefCommanded();
 
-        if ((!ESTOP_SAFE || Ethernet.linkStatus() == EthernetLinkStatus::LinkOFF || !mb.hasClient()) && !in_estop) {
+        const bool estop_conditions_met =
+            !ESTOP_SAFE
+            || Ethernet.linkStatus() == EthernetLinkStatus::LinkOFF
+            || !mb.hasClient()
+            || hmi_commands_estop;
+
+        if (estop_conditions_met && !in_estop) {
             PRINTLN("ESTOP triggered");
             PRINT("\tESTOP_SAFE: ");
             PRINTLN(ESTOP_SAFE?"TRUE":"FALSE");
@@ -211,6 +219,8 @@ int main() {
             PRINTLN(Ethernet.linkStatus() == EthernetLinkStatus::LinkOFF?"TRUE":"FALSE");
             PRINT("\tmb.hasClient(): ");
             PRINTLN(mb.hasClient()?"TRUE":"FALSE");
+            PRINT("\thmi_commands_estop: ");
+            PRINTLN(hmi_commands_estop?"TRUE":"FALSE");
             estop();
         }
 
@@ -353,7 +363,6 @@ State state_machine_iter(const State state_in) {
             return State::MANUAL_GO_TO_POSITION_WAIT;
         }
         case State::JOB_CALC_NEXT_POSITION: {
-
             if (stop_cycle_latched) {
                 PRINTLN("Stopping cycle");
                 return State::IDLE;
@@ -468,7 +477,8 @@ State state_machine_iter(const State state_in) {
             const bool safe_to_deactivate = ESTOP_SAFE
                 && Ethernet.linkStatus() == EthernetLinkStatus::LinkON
                 && mb.hasClient()
-                && (millis() - last_estop_time) > ESTOP_DEACTIVATE_COOLDOWN_MS;
+                && (millis() - last_estop_time) > ESTOP_DEACTIVATE_COOLDOWN_MS
+                && !hmi_commands_estop;
 
             if (safe_to_deactivate) {
                 in_estop = false;
