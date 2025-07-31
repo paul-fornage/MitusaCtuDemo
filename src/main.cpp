@@ -126,8 +126,7 @@ auto last_state = State::IDLE;
 // Speed to weld in hundreths of an inch per second
 u16 speed = 0;
 
-// TODO: pause and cancel cycles
-
+// TODO: Max speed, position
 
 int main() {
     ESTOP_CONNECTOR.Mode(Connector::INPUT_DIGITAL);
