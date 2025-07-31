@@ -27,6 +27,9 @@
 #define ESTOP_CON_SAFE_STATE true
 #define ESTOP_SAFE (ESTOP_CONNECTOR.State() == ESTOP_CON_SAFE_STATE)
 
+#define IP_ADDRESS 192,168,1,61
+#define USE_DHCP false
+
 static constexpr u16 NUM_POSITIONS = 16;
 
 // Hregs
@@ -46,6 +49,8 @@ static constexpr u16 RESET_CYCLE_LATCH_OFFSET = 13;
 static constexpr u16 GO_TO_POSITION_LATCH_OFFSET = 14;
 static constexpr u16 JOB_ACTIVE_OFFSET = 15;
 static constexpr u16 STOP_CYCLE_LATCH_OFFSET = 16;
+static constexpr u16 JOB_MOVING_OFFSET = 17;
+static constexpr u16 JOB_WAITING_OFFSET = 18;
 static constexpr u16 IN_ESTOP_OFFSET = 20;
 static constexpr u16 ERROR_OFFSET = 21;
 static constexpr u16 ENABLED_POSITIONS_OFFSET = 32;
@@ -109,7 +114,7 @@ auto last_state = State::IDLE;
 u16 speed = 0;
 
 // TODO: pause and cancel cycles
-// TODO: indicate moving towards vs waiting
+
 // TODO: delay count paused in ESTOP
 
 int main() {
@@ -123,7 +128,7 @@ int main() {
         PRINTLN("USB connected");
     }
 
-    ethernet_setup(true, IPAddress(192, 168, 1, 59), 10);
+    ethernet_setup(USE_DHCP, IPAddress(IP_ADDRESS), 1);
     mb.begin();
     mb.Coil(IS_HOMED_OFFSET, is_homed);
     mb.Coil(IN_ESTOP_OFFSET, in_estop);
@@ -132,6 +137,10 @@ int main() {
     mb.Coil(GO_TO_POSITION_LATCH_OFFSET, false);
     mb.Coil(JOB_ACTIVE_OFFSET, false);
     mb.Coil(STOP_CYCLE_LATCH_OFFSET, false);
+    mb.Coil(RESET_CYCLE_LATCH_OFFSET, false);
+    mb.Coil(ERROR_OFFSET, false);
+    mb.Coil(JOB_MOVING_OFFSET, false);
+    mb.Coil(JOB_WAITING_OFFSET, false);
 
     MotorMgr.MotorInputClocking(MotorManager::CLOCK_RATE_NORMAL);
     MotorMgr.MotorModeSet(MotorManager::MOTOR_ALL, Connector::CPM_MODE_STEP_AND_DIR);
@@ -155,6 +164,9 @@ int main() {
             machine_state == State::JOB_WAIT_DELAY
             || machine_state == State::JOB_CALC_NEXT_POSITION
             || machine_state == State::JOB_WAIT_POSITION);
+        mb.Coil(JOB_MOVING_OFFSET, machine_state == State::JOB_WAIT_POSITION);
+        mb.Coil(JOB_WAITING_OFFSET, machine_state == State::JOB_WAIT_DELAY);
+
         mb.Hreg(MACHINE_STATE_OFFSET) = static_cast<u16>(machine_state);
         mb.Hreg(CURRENT_POSITION_INDEX_OFFSET) = cycle_target_index;
         if (is_homed) {
@@ -177,9 +189,17 @@ int main() {
         mb.Hreg(CURRENT_POSITION_INDEX_OFFSET) = cycle_target_index;
         mb.Hreg(CURRENT_POSITION_OFFSET) = CARRIAGE_MOTOR.PositionRefCommanded();
 
-        if (!ESTOP_SAFE && !in_estop) {
+        if ((!ESTOP_SAFE || Ethernet.linkStatus() == EthernetLinkStatus::LinkOFF || !mb.hasClient()) && !in_estop) {
+            PRINTLN("ESTOP triggered");
+            PRINT("\tESTOP_SAFE: ");
+            PRINTLN(ESTOP_SAFE?"TRUE":"FALSE");
+            PRINT("\tEthernet.linkStatus() == EthernetLinkStatus::LinkOFF: ");
+            PRINTLN(Ethernet.linkStatus() == EthernetLinkStatus::LinkOFF?"TRUE":"FALSE");
+            PRINT("\tmb.hasClient(): ");
+            PRINTLN(mb.hasClient()?"TRUE":"FALSE");
             estop();
         }
+
         last_state = machine_state;
 
         if (in_estop && machine_state != State::ESTOP && machine_state != State::ESTOP_START && machine_state != State::ERROR_STATE) {
@@ -410,16 +430,32 @@ State state_machine_iter(const State state_in) {
             return State::ESTOP;
         }
         case State::ESTOP: {
-            if (ESTOP_SAFE && (millis() - last_estop_time) > ESTOP_DEACTIVATE_COOLDOWN_MS) {
+            const bool safe_to_deactivate = ESTOP_SAFE
+                && Ethernet.linkStatus() == EthernetLinkStatus::LinkON
+                && mb.hasClient()
+                && (millis() - last_estop_time) > ESTOP_DEACTIVATE_COOLDOWN_MS;
+
+            if (safe_to_deactivate) {
                 in_estop = false;
-                return estop_resume_state(last_state_before_estop);
+                const State resuming_state = estop_resume_state(last_state_before_estop);
+                return resuming_state;
+            } else {
+                if (Ethernet.linkStatus() == EthernetLinkStatus::LinkOFF) {
+                    PRINTLN("Ethernet is down in estop, trying to connect");
+                    ethernet_setup(USE_DHCP, IPAddress(IP_ADDRESS), 1);
+                    mb.begin();
+                } else if (!mb.hasClient()) {
+                    PRINTLN("No mb client in estop, but eth is good. trying to connect");
+                    mb.task();
+                }
             }
             return State::ESTOP;
         }
 
         case State::ERROR_STATE: {
             if (!in_estop) {
-                estop();
+                in_estop = true;
+                CARRIAGE_MOTOR.MoveStopAbrupt();
             }
             return State::ERROR_STATE;
         }
@@ -597,7 +633,6 @@ void print_state(const State state_in) {
 State estop_resume_state(const State state_in) {
     switch (state_in) {
         case State::IDLE:
-            break;
         case State::START_HOMING:
         case State::WAIT_FOR_HOMING:
             return State::IDLE;
