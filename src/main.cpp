@@ -26,7 +26,7 @@
 /// Interrupt priority for the periodic interrupt. 0 is highest priority, 7 is lowest.
 #define PERIODIC_INTERRUPT_PRIORITY 5
 
-const IPAddress IP_ADDRESS(192,168,1,61);
+const IPAddress IP_ADDRESS(192,168,1,66);
 static constexpr bool USE_DHCP = true;
 
 static constexpr u16 NUM_POSITIONS = 16;
@@ -105,10 +105,11 @@ enum class State : u16{
 };
 
 
-static constexpr i32 MOTOR_MAX_VEL_SPS = 14500;
+static constexpr i32 MOTOR_MAX_VEL_SPS = 3000;
 static constexpr i32 MOTOR_MAX_VEL_HPM = sps_to_hpm(MOTOR_MAX_VEL_SPS);
 
-static constexpr i32 MOTOR_HOMING_VEL_HPM = 3000;
+static constexpr i32 MOTOR_HOMING_VEL_HPM = 1000;
+static constexpr i32 MOTOR_HOMING_VEL_SPS = hpm_to_sps(MOTOR_HOMING_VEL_HPM);
 
 // in steps per second squared
 static constexpr i32 MOTOR_MAX_ACC = 100000;
@@ -132,6 +133,7 @@ u16 cycle_target_index = 0; // gets set to the next valid target position at sta
 u32 cycle_reached_target_time = 0; // `millis()` at the instant the carriage reached the target pos
 u32 millis_delay = 0; // `millis()` at the instant the carriage reached the target pos
 u16 manual_go_to_pos_target_hundreths = 0;
+u32 last_estop_dbg_millis = 0;
 i32 job_target_steps = 0;
 // Jog speed in hundreths of an inch per minute
 u16 speed = 0;
@@ -235,13 +237,7 @@ int main() {
 
         mb.Hreg(CURRENT_POSITION_INDEX_OFFSET) = cycle_target_index;
 
-        const bool estop_conditions_met =
-            !ESTOP_SAFE
-            || Ethernet.linkStatus() == EthernetLinkStatus::LinkOFF
-            || !mb.hasClient()
-            || hmi_commands_estop;
-
-        if (estop_conditions_met && !in_estop) {
+        if (estop_conditions_met() && !in_estop) {
             PRINTLN("ESTOP triggered");
             PRINT("\tESTOP_SAFE: ");
             PRINTLN(ESTOP_SAFE?"TRUE":"FALSE");
@@ -311,7 +307,7 @@ State state_machine_iter(const State state_in) {
             CARRIAGE_MOTOR.EnableRequest(true);
             delay(50);
             CARRIAGE_MOTOR.PositionRefSet(0);
-            CARRIAGE_MOTOR.MoveVelocity(-MOTOR_HOMING_VEL_HPM);
+            CARRIAGE_MOTOR.MoveVelocity(-MOTOR_HOMING_VEL_SPS);
             delay(50);
             return State::WAIT_FOR_HOMING;
         }
@@ -583,11 +579,17 @@ State state_machine_iter(const State state_in) {
                 return resuming_state;
             } else {
                 if (Ethernet.linkStatus() == EthernetLinkStatus::LinkOFF) {
-                    PRINTLN("Ethernet is down in estop, trying to connect");
+                    if (millis() - last_estop_dbg_millis > 1000) {
+                        PRINTLN("Ethernet is down in estop, trying to connect");
+                        last_estop_dbg_millis = millis();
+                    }
                     ethernet_setup(USE_DHCP, IPAddress(IP_ADDRESS), 1);
                     mb.begin();
                 } else if (!mb.hasClient()) {
-                    PRINTLN("No mb client in estop, but eth is good. trying to connect");
+                    if (millis() - last_estop_dbg_millis > 1000) {
+                        PRINTLN("No mb client in estop, but eth is good. trying to connect");
+                        last_estop_dbg_millis = millis();
+                    }
                     mb.task();
                 }
             }

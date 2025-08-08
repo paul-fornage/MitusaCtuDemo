@@ -27,7 +27,7 @@ static_assert(round_to_nearest(-51) == -51, "round error");
 static constexpr i64 FIXED_BITS = 30;
 static constexpr i64 FIXED_DENOMINATOR = 1ll << FIXED_BITS;
 // hundreths to steps
-static constexpr f64 HTS_RATIO = 474.949440542709; // CTU: 474.949440542709
+static constexpr f64 HTS_RATIO = 24; // CTU: 474.949440542709
 // hundreths to steps fixed fraction
 static constexpr i64 FIXED_HTS_RATIO = round_to_nearest(HTS_RATIO * FIXED_DENOMINATOR);
 // steps to hundreths
