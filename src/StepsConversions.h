@@ -8,8 +8,6 @@
 
 #define ABS(x) ((x) < 0 ? -(x) : (x))
 
-// these values explained in ```reference/steps-inch conversion.xlsx```
-
 
 static constexpr f64 HALF = 0.5;
 static constexpr i64 round_to_nearest(const f64 x) {

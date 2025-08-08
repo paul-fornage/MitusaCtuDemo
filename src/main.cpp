@@ -2,12 +2,15 @@
 #include <ClearCore.h>
 #include <utility>
 #include <RsTypeNames.h>
-#include <ModbusAPI.h>
-#include <ModbusTCPTemplate.h>
+#include <ModBussy.h>
 #include <Ethernet.h>
 #include <NvmManager.h>
 #include <StepsConversions.h>
 
+#define MB_COIL_BITS 256
+#define MB_DISCRETE_BITS 16
+#define MB_HREGS 128
+#define MB_IREGS 1
 
 #define ABS(x) ((x) < 0 ? -(x) : (x))
 
@@ -24,7 +27,6 @@
 #define PERIODIC_INTERRUPT_PRIORITY 5
 
 const IPAddress IP_ADDRESS(192,168,1,61);
-const IPAddress HMI_IP(192, 168, 1, 173);
 static constexpr bool USE_DHCP = true;
 
 static constexpr u16 NUM_POSITIONS = 16;
@@ -77,6 +79,11 @@ enum class MotorWaitResult {
     ERROR,
 };
 
+u16 coils[(MB_COIL_BITS + 15) / 16];
+u16 discretes[(MB_DISCRETE_BITS + 15) / 16];
+u16 holding[MB_HREGS];
+u16 input[MB_IREGS];
+
 enum class State : u16{
     IDLE,
     START_HOMING,
@@ -112,7 +119,6 @@ static constexpr i32 START_POS_STEPS = hundreths_to_steps(START_POS_HUNDRETHS);
 static constexpr i32 MOTOR_MAX_POS_HUNDRETHS = 10000;
 static constexpr i32 MOTOR_MAX_POS_STEPS = hundreths_to_steps(MOTOR_MAX_POS_HUNDRETHS);
 
-
 bool is_homed = false;
 bool in_estop = false;
 bool is_cycle_reset = true; // should the next position calculation return the first enabled position?
@@ -120,20 +126,17 @@ bool hmi_commands_estop = false;
 u32 last_estop_time = 0;
 auto last_state_before_estop = State::IDLE;
 static constexpr u32 ESTOP_DEACTIVATE_COOLDOWN_MS = 1000;
-bool hmi_connected;
 u16 manual_target_pos_index = 65535; // 65535 always out of bounds
 u16 cycle_last_index = 0; // gets set to `cycle_target_index` after reaching target and waiting delay
 u16 cycle_target_index = 0; // gets set to the next valid target position at start of cycle
 u32 cycle_reached_target_time = 0; // `millis()` at the instant the carriage reached the target pos
+u32 millis_delay = 0; // `millis()` at the instant the carriage reached the target pos
 u16 manual_go_to_pos_target_hundreths = 0;
 i32 job_target_steps = 0;
-u32 last_estop_dbg_millis = 0;
-
 // Jog speed in hundreths of an inch per minute
 u16 speed = 0;
 
-class ModbusEthernet final : public ModbusAPI<ModbusTCPTemplate<EthernetServer, EthernetClient>> {};
-ModbusEthernet mb;  //ModbusTCP object
+ModBussy mb(502, coils, discretes, holding, input);
 
 void print_motor_alerts();
 void ethernet_setup(bool use_dhcp, const IPAddress &ip, u16 max_dhcp_attempts);
@@ -145,12 +148,12 @@ State estop_resume_state(State state_in);
 bool latch_handler(u16 offset);
 void ConfigurePeriodicInterrupt(uint32_t frequencyHz);
 MotorWaitResult wait_for_motor_motion(MotorDriver &Motor);
-
 extern "C" void TCC2_0_Handler(void) __attribute__((
             alias("PeriodicInterrupt")));
 
 volatile auto machine_state = State::IDLE;
 auto last_state = State::IDLE;
+
 
 int main() {
     ESTOP_CONNECTOR.Mode(Connector::INPUT_DIGITAL);
@@ -166,22 +169,19 @@ int main() {
     ConfigurePeriodicInterrupt(1000);
 
     ethernet_setup(USE_DHCP, IP_ADDRESS, 1);
-    mb.client();
-    mb.writeCoil(HMI_IP, IS_HOMED_OFFSET, is_homed);
-    mb.writeCoil(HMI_IP, IN_ESTOP_OFFSET, in_estop);
-    mb.writeCoil(HMI_IP, START_CYCLE_LATCH_OFFSET, false);
-    mb.writeCoil(HMI_IP, HOME_LATCH_OFFSET, false);
-    mb.writeCoil(HMI_IP, GO_TO_POSITION_LATCH_OFFSET, false);
-    mb.writeCoil(HMI_IP, EXECUTE_SR_LATCH_OFFSET, false);
-    mb.writeCoil(HMI_IP, JOB_ACTIVE_OFFSET, false);
-    mb.writeCoil(HMI_IP, STOP_CYCLE_LATCH_OFFSET, false);
-    mb.writeCoil(HMI_IP, RESET_CYCLE_LATCH_OFFSET, false);
-    mb.writeCoil(HMI_IP, ERROR_OFFSET, false);
-    mb.writeCoil(HMI_IP, JOB_MOVING_OFFSET, false);
-    mb.writeCoil(HMI_IP, JOB_WAITING_OFFSET, false);
-    mb.writeCoil(HMI_IP, SET_ESTOP_OFFSET, false);
-    mb.writeCoil(HMI_IP, ARM_ENABLE, false);
-    mb.writeHreg(HMI_IP, SPEED_OFFSET, 100);
+    mb.begin();
+    mb.Coil(IS_HOMED_OFFSET, is_homed);
+    mb.Coil(IN_ESTOP_OFFSET, in_estop);
+    mb.Coil(START_CYCLE_LATCH_OFFSET, false);
+    mb.Coil(HOME_LATCH_OFFSET, false);
+    mb.Coil(GO_TO_POSITION_LATCH_OFFSET, false);
+    mb.Coil(JOB_ACTIVE_OFFSET, false);
+    mb.Coil(STOP_CYCLE_LATCH_OFFSET, false);
+    mb.Coil(RESET_CYCLE_LATCH_OFFSET, false);
+    mb.Coil(ERROR_OFFSET, false);
+    mb.Coil(JOB_MOVING_OFFSET, false);
+    mb.Coil(JOB_WAITING_OFFSET, false);
+    mb.Coil(SET_ESTOP_OFFSET, false);
 
     MotorMgr.MotorInputClocking(MotorManager::CLOCK_RATE_NORMAL);
     MotorMgr.MotorModeSet(MotorManager::MOTOR_ALL, Connector::CPM_MODE_STEP_AND_DIR);
@@ -192,86 +192,65 @@ int main() {
     CARRIAGE_MOTOR.AccelMax(MOTOR_MAX_ACC);
     CARRIAGE_MOTOR.VelMax(MOTOR_MAX_VEL_SPS);
 
-    mb.task();
+
+    mb.Hreg(SPEED_OFFSET) = 100;
 
     while (true) {
         mb.task();
-        if (mb.isConnected(HMI_IP)) {
-            hmi_connected = true;
-            mb.writeCoil(HMI_IP, IS_HOMED_OFFSET, is_homed);
-            mb.writeCoil(HMI_IP, IN_ESTOP_OFFSET, in_estop);
-            mb.writeCoil(HMI_IP, ERROR_OFFSET, machine_state == State::ERROR_STATE);
-            mb.writeCoil(HMI_IP, JOB_ACTIVE_OFFSET,
-                machine_state == State::JOB_WAIT_DELAY
-                || machine_state == State::JOB_CALC_NEXT_POSITION
-                || machine_state == State::JOB_WAIT_POSITION);
-            mb.writeCoil(HMI_IP, JOB_MOVING_OFFSET, machine_state == State::JOB_WAIT_POSITION);
-            mb.writeCoil(HMI_IP, JOB_WAITING_OFFSET, machine_state == State::JOB_WAIT_DELAY);
-            mb.writeHreg(HMI_IP, CURRENT_POSITION_INDEX_OFFSET, cycle_target_index);
-            mb.writeHreg(HMI_IP, MACHINE_STATE_OFFSET, static_cast<u16>(machine_state));
-            mb.writeHreg(HMI_IP, CURRENT_POSITION_INDEX_OFFSET, cycle_target_index);
-            mb.writeHreg(HMI_IP, DELAY_REMAINING_OFFSET, static_cast<u16>(delay_countdown/100));
-            if (is_homed) {
-                mb.writeHreg(HMI_IP, CURRENT_POSITION_OFFSET, steps_to_hundreths(CARRIAGE_MOTOR.PositionRefCommanded()));
-            } else {
-                mb.writeHreg(HMI_IP, CURRENT_POSITION_OFFSET, static_cast<u16>(0));
-            }
+        mb.Coil(IS_HOMED_OFFSET, is_homed);
+        mb.Coil(IN_ESTOP_OFFSET, in_estop);
+        mb.Coil(ERROR_OFFSET, machine_state == State::ERROR_STATE);
+        mb.Coil(JOB_ACTIVE_OFFSET,
+            machine_state == State::JOB_WAIT_DELAY
+            || machine_state == State::JOB_CALC_NEXT_POSITION
+            || machine_state == State::JOB_WAIT_POSITION);
+        mb.Coil(JOB_MOVING_OFFSET, machine_state == State::JOB_WAIT_POSITION);
+        mb.Coil(JOB_WAITING_OFFSET, machine_state == State::JOB_WAIT_DELAY);
 
-            mb.readCoil(HMI_IP, SET_ESTOP_OFFSET, &hmi_commands_estop);
-
-
-            u16 temp_speed = 0;
-            mb.readHreg(HMI_IP, SPEED_OFFSET, &temp_speed);
-            if (temp_speed > MOTOR_MAX_VEL_HPM) {
-                speed = MOTOR_MAX_VEL_HPM;
-                mb.writeHreg(HMI_IP, SPEED_OFFSET, MOTOR_MAX_VEL_HPM);
-            } else {
-                speed = temp_speed;
-            }
-
-            bool goto_pos = false;
-            u16 tid = mb.readCoil(HMI_IP, GO_TO_POSITION_LATCH_OFFSET, &goto_pos);
-            if (goto_pos) {
-                PRINT("mb.readCoil(HMI_IP, GO_TO_POSITION_LATCH_OFFSET) = ");
-                PRINTLN(goto_pos?"TRUE":"FALSE");
-            }
-            PRINT("tid: ");
-            PRINTLN(tid);
-
-            home_latched = latch_handler(HOME_LATCH_OFFSET);
-            start_cycle_latched = latch_handler(START_CYCLE_LATCH_OFFSET);
-            stop_cycle_latched = latch_handler(STOP_CYCLE_LATCH_OFFSET);
-            go_to_position_latched = latch_handler(GO_TO_POSITION_LATCH_OFFSET);
-            reset_cycle_latched = latch_handler(RESET_CYCLE_LATCH_OFFSET);
-            execute_sr_latched = latch_handler(EXECUTE_SR_LATCH_OFFSET);
-
-            mb.task();
+        mb.Hreg(MACHINE_STATE_OFFSET) = static_cast<u16>(machine_state);
+        mb.Hreg(CURRENT_POSITION_INDEX_OFFSET) = cycle_target_index;
+        mb.Hreg(DELAY_REMAINING_OFFSET) = static_cast<u16>(delay_countdown/100);
+        if (is_homed) {
+            mb.Hreg(CURRENT_POSITION_OFFSET) = steps_to_hundreths(CARRIAGE_MOTOR.PositionRefCommanded());
         } else {
-            hmi_connected = mb.connect(HMI_IP);
-            home_latched = false;
-            start_cycle_latched = false;
-            stop_cycle_latched = false;
-            go_to_position_latched = false;
-            reset_cycle_latched = false;
-            execute_sr_latched = false;
+            mb.Hreg(CURRENT_POSITION_OFFSET) = 0;
         }
 
-        CARRIAGE_MOTOR.VelMax(hpm_to_sps(speed));
+        hmi_commands_estop = mb.Coil(SET_ESTOP_OFFSET);
 
 
+        const u16 temp_speed = mb.Hreg(SPEED_OFFSET);
+        if (temp_speed > MOTOR_MAX_VEL_HPM) {
+            speed = MOTOR_MAX_VEL_HPM;
+            mb.Hreg(SPEED_OFFSET) = MOTOR_MAX_VEL_HPM;
+        } else {
+            speed = temp_speed;
+        }
 
+        home_latched = latch_handler(HOME_LATCH_OFFSET);
+        start_cycle_latched = latch_handler(START_CYCLE_LATCH_OFFSET);
+        stop_cycle_latched = latch_handler(STOP_CYCLE_LATCH_OFFSET);
+        go_to_position_latched = latch_handler(GO_TO_POSITION_LATCH_OFFSET);
+        reset_cycle_latched = latch_handler(RESET_CYCLE_LATCH_OFFSET);
 
+        mb.Hreg(CURRENT_POSITION_INDEX_OFFSET) = cycle_target_index;
 
-        if (estop_conditions_met() && !in_estop) {
+        const bool estop_conditions_met =
+            !ESTOP_SAFE
+            || Ethernet.linkStatus() == EthernetLinkStatus::LinkOFF
+            || !mb.hasClient()
+            || hmi_commands_estop;
+
+        if (estop_conditions_met && !in_estop) {
             PRINTLN("ESTOP triggered");
             PRINT("\tESTOP_SAFE: ");
             PRINTLN(ESTOP_SAFE?"TRUE":"FALSE");
             PRINT("\tEthernet.linkStatus() == EthernetLinkStatus::LinkOFF: ");
             PRINTLN(Ethernet.linkStatus() == EthernetLinkStatus::LinkOFF?"TRUE":"FALSE");
+            PRINT("\tmb.hasClient(): ");
+            PRINTLN(mb.hasClient()?"TRUE":"FALSE");
             PRINT("\thmi_commands_estop: ");
             PRINTLN(hmi_commands_estop?"TRUE":"FALSE");
-            PRINT("\thmi_connected: ");
-            PRINTLN(hmi_connected?"TRUE":"FALSE");
             estop();
         }
 
@@ -401,20 +380,20 @@ State state_machine_iter(const State state_in) {
             }
         }
         case State::MANUAL_GO_TO_POSITION: {
-            mb.readHreg(HMI_IP, SELECTED_POSITION_OFFSET, &manual_target_pos_index);
+            manual_target_pos_index = mb.Hreg(SELECTED_POSITION_OFFSET);
             PRINT("going to position index ");
             PRINTLN(manual_target_pos_index);
             if (manual_target_pos_index >= NUM_POSITIONS) {
                 PRINTLN("Position index out of bounds.");
                 return State::IDLE;
             }
-            mb.readHreg(HMI_IP, POSITIONS_OFFSET + manual_target_pos_index, &manual_go_to_pos_target_hundreths);
+            const u16 target_hundreths = mb.Hreg(POSITIONS_OFFSET + manual_target_pos_index);
             PRINT("position in hundreths: ");
-            PRINTLN(manual_go_to_pos_target_hundreths);
-            const i32 target_steps = hundreths_to_steps(manual_go_to_pos_target_hundreths);
+            PRINTLN(target_hundreths);
+            const i32 target_steps = hundreths_to_steps(target_hundreths);
             PRINT("position in steps: ");
             PRINTLN(target_steps);
-            if (target_steps > MOTOR_MAX_POS_STEPS) {
+            if (target_steps > MOTOR_MAX_POS_STEPS || target_steps < 0) {
                 PRINTLN("Target position too far for manual move");
                 return State::ERROR_STATE;
             }
@@ -470,12 +449,10 @@ State state_machine_iter(const State state_in) {
                 PRINTLN("Stopping cycle");
                 return State::IDLE;
             }
-            bool enabled = false;
+
             if (is_cycle_reset) {
                 for (u16 i = 0; i < NUM_POSITIONS; i++) {
-
-                    mb.readCoil(HMI_IP, ENABLED_POSITIONS_OFFSET + i, &enabled);
-                    if (enabled) {
+                    if (mb.Coil(ENABLED_POSITIONS_OFFSET + i)) {
                         cycle_target_index = i;
                         is_cycle_reset = false;
                         PRINT("Reset cycle mode, found first en pos: ");
@@ -492,9 +469,7 @@ State state_machine_iter(const State state_in) {
             for (u16 i = 0; i < NUM_POSITIONS; i++) {
                 next_target_index = (next_target_index + 1) % NUM_POSITIONS;
 
-                mb.readCoil(HMI_IP, ENABLED_POSITIONS_OFFSET + next_target_index, &enabled);
-
-                if (enabled) {
+                if (mb.Coil(ENABLED_POSITIONS_OFFSET + next_target_index)) {
                     break;
                 }
             }
@@ -520,21 +495,19 @@ State state_machine_iter(const State state_in) {
             PRINT("Going to position at index ");
             PRINTLN(cycle_target_index);
 
-            u16 target_hundreths = 0;
-            mb.readHreg(HMI_IP, POSITIONS_OFFSET + cycle_target_index, &target_hundreths);
-            job_target_steps = hundreths_to_steps(target_hundreths);
+            const u16 target_hundreths = mb.Hreg(POSITIONS_OFFSET + cycle_target_index);
+            const i32 target_steps = hundreths_to_steps(target_hundreths);
 
-            if (job_target_steps > MOTOR_MAX_POS_STEPS || job_target_steps < 0) {
+            if (target_steps > MOTOR_MAX_POS_STEPS) {
                 PRINTLN("Target position too far");
                 return State::ERROR_STATE;
             }
 
-            CARRIAGE_MOTOR.Move(job_target_steps, StepGenerator::MOVE_TARGET_ABSOLUTE);
+            CARRIAGE_MOTOR.Move(target_steps, StepGenerator::MOVE_TARGET_ABSOLUTE);
             return State::JOB_WAIT_POSITION;
         }
 
         case State::JOB_WAIT_POSITION: {
-
             if (stop_cycle_latched) {
                 CARRIAGE_MOTOR.MoveStopAbrupt();
                 PRINTLN("Stopping cycle");
@@ -579,12 +552,8 @@ State state_machine_iter(const State state_in) {
                     }
                 }
             }
-
-
             return State::JOB_WAIT_POSITION;
         }
-
-
         case State::JOB_WAIT_DELAY: {
             if (stop_cycle_latched) {
                 PRINTLN("Stopping cycle");
@@ -605,8 +574,7 @@ State state_machine_iter(const State state_in) {
         case State::ESTOP_START: {
             return State::ESTOP;
         }
-        case State::ESTOP: {
-            const bool safe_to_deactivate = !estop_conditions_met()
+        case State::ESTOP: {const bool safe_to_deactivate = !estop_conditions_met()
                 && (millis() - last_estop_time) > ESTOP_DEACTIVATE_COOLDOWN_MS;
 
             if (safe_to_deactivate) {
@@ -614,17 +582,13 @@ State state_machine_iter(const State state_in) {
                 const State resuming_state = estop_resume_state(last_state_before_estop);
                 return resuming_state;
             } else {
-                if (millis() - last_estop_dbg_millis > 1000) {
-                    PRINTLN("In estop.");
-                    PRINT("\tESTOP_SAFE: ");
-                    PRINTLN(ESTOP_SAFE?"TRUE":"FALSE");
-                    PRINT("\tEthernet.linkStatus() == EthernetLinkStatus::LinkOFF: ");
-                    PRINTLN(Ethernet.linkStatus() == EthernetLinkStatus::LinkOFF?"TRUE":"FALSE");
-                    PRINT("\thmi_commands_estop: ");
-                    PRINTLN(hmi_commands_estop?"TRUE":"FALSE");
-                    PRINT("\thmi_connected: ");
-                    PRINTLN(hmi_connected?"TRUE":"FALSE");
-                    last_estop_dbg_millis = millis();
+                if (Ethernet.linkStatus() == EthernetLinkStatus::LinkOFF) {
+                    PRINTLN("Ethernet is down in estop, trying to connect");
+                    ethernet_setup(USE_DHCP, IPAddress(IP_ADDRESS), 1);
+                    mb.begin();
+                } else if (!mb.hasClient()) {
+                    PRINTLN("No mb client in estop, but eth is good. trying to connect");
+                    mb.task();
                 }
             }
             return State::ESTOP;
@@ -655,17 +619,15 @@ extern "C" void PeriodicInterrupt(void) {
 }
 
 bool latch_handler(const u16 offset) {
-    bool res = false;
-    mb.readCoil(HMI_IP, offset, &res);
-    if (res) {
-        mb.writeCoil(HMI_IP, offset, false);
+    if (mb.Coil(offset)) {
+        mb.Coil(offset, false);
         return true;
     }
     return false;
 }
 
 bool estop_conditions_met() {
-    return !hmi_connected
+    return !mb.hasClient()
         || !ESTOP_SAFE
         || Ethernet.linkStatus() == EthernetLinkStatus::LinkOFF
         || hmi_commands_estop;
@@ -781,6 +743,8 @@ void print_motor_alerts(){
     }
 }
 
+
+
 MotorWaitResult wait_for_motor_motion(MotorDriver &Motor) {
     if (Motor.HlfbState() == MotorDriver::HLFB_ASSERTED && Motor.StepsComplete()) {
         return MotorWaitResult::DONE;
@@ -822,6 +786,7 @@ const char* state_name(const State state_in) {
         default: return "UNKNOWN_STATE";
     }
 }
+
 
 State estop_resume_state(const State state_in) {
     switch (state_in) {
