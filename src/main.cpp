@@ -6,6 +6,7 @@
 #include <Ethernet.h>
 #include <NvmManager.h>
 #include <StepsConversions.h>
+#include <DummyMotor.h>
 
 #define MB_COIL_BITS 256
 #define MB_DISCRETE_BITS 16
@@ -17,7 +18,10 @@
 #define PRINT(expr) ConnectorUsb.Send(expr)
 #define PRINTLN(expr) ConnectorUsb.SendLine(expr)
 
-#define CARRIAGE_MOTOR ConnectorM0
+//DummyMotor FakeCarriageMotor("Carriage");
+
+ #define CARRIAGE_MOTOR ConnectorM0
+//#define CARRIAGE_MOTOR FakeCarriageMotor
 
 #define ESTOP_CONNECTOR ConnectorA12
 #define ESTOP_CON_SAFE_STATE true
@@ -32,21 +36,19 @@ static constexpr bool USE_DHCP = true;
 static constexpr u16 NUM_POSITIONS = 16;
 
 // Hregs
-static constexpr u16 SELECTED_SUBROUTINE_OFFSET = 8;
-static constexpr u16 EXECUTE_SR_LATCH_OFFSET = 9; // Sub-routine input latch. not an EE 'SR latch'
-static constexpr u16 SELECTED_POSITION_OFFSET = 10; // position to go to when GO_TO_POSITION_LATCH is latched
+static constexpr u16 CURRENT_SUBROUTINE_OFFSET = 8; // sr index read by arm
+static constexpr u16 SELECTED_STATION_OFFSET = 10; // position to go to when GO_TO_POSITION_LATCH is latched
 static constexpr u16 CURRENT_POSITION_INDEX_OFFSET = 11;
 static constexpr u16 SPEED_OFFSET = 12;
 static constexpr u16 CURRENT_POSITION_OFFSET = 13;
 static constexpr u16 MACHINE_STATE_OFFSET = 14;
-static constexpr u16 DELAY_REMAINING_OFFSET = 15;
 static constexpr u16 POSITIONS_OFFSET = 16;
 static constexpr u16 SUBROUTINE_OFFSET = POSITIONS_OFFSET + NUM_POSITIONS;
 
-
 // Coils
-static constexpr u16 ARM_ENABLE = 8;
-static constexpr u16 ARM_RUNNING = 9;
+static constexpr u16 EXECUTE_SR_LATCH_OFFSET = 7; // Sub-routine input latch. not an EE 'SR latch'
+static constexpr u16 ARM_ENABLE_OFFSET = 8;
+static constexpr u16 ARM_RUNNING_OFFSET = 9;
 static constexpr u16 START_CYCLE_LATCH_OFFSET = 10;
 static constexpr u16 HOME_LATCH_OFFSET = 11;
 static constexpr u16 IS_HOMED_OFFSET = 12;
@@ -55,20 +57,17 @@ static constexpr u16 GO_TO_POSITION_LATCH_OFFSET = 14;
 static constexpr u16 JOB_ACTIVE_OFFSET = 15;
 static constexpr u16 STOP_CYCLE_LATCH_OFFSET = 16;
 static constexpr u16 JOB_MOVING_OFFSET = 17;
-static constexpr u16 JOB_WAITING_OFFSET = 18;
+static constexpr u16 JOB_SR_ACTIVE_OFFSET = 18;
 static constexpr u16 SET_ESTOP_OFFSET = 19;
 static constexpr u16 IN_ESTOP_OFFSET = 20;
 static constexpr u16 ERROR_OFFSET = 21;
 static constexpr u16 ENABLED_POSITIONS_OFFSET = 32;
-
-volatile u32 delay_countdown = 0;
 
 bool home_latched = false;
 bool start_cycle_latched = false;
 bool stop_cycle_latched = false;
 bool go_to_position_latched = false;
 bool reset_cycle_latched = false;
-bool pause_cycle_latched = false;
 bool execute_sr_latched = false;
 
 enum class MotorWaitResult {
@@ -93,20 +92,23 @@ enum class State : u16{
     MANUAL_GO_TO_POSITION,
     MANUAL_GO_TO_POSITION_WAIT,
     MANUAL_EXECUTE_SR,
-    MANUAL_EXECUTE_SR_WAIT,
+    MANUAL_EXECUTE_SR_WAIT_START,
+    MANUAL_EXECUTE_SR_WAIT_FINISH,
     JOB_CALC_NEXT_POSITION,
     JOB_MOVE_NEXT_POSITION = 16,
     JOB_WAIT_POSITION = 17,
-    JOB_WAIT_DELAY = 18,
-    JOB_STOP_DELAY = 19,
+    JOB_START_SR = 18,
+    JOB_WAIT_SR_START = 19,
+    JOB_WAIT_SR_FINISH = 20,
+    STOP_SR_DELAY,
     ESTOP_START,
     ESTOP,
     ERROR_STATE, // unrecoverable by design
 };
 
 
-static constexpr i32 MOTOR_MAX_VEL_SPS = 3000;
-static constexpr i32 MOTOR_MAX_VEL_HPM = sps_to_hpm(MOTOR_MAX_VEL_SPS);
+static constexpr i32 MOTOR_MAX_VEL_HPM = 2000;
+static constexpr i32 MOTOR_MAX_VEL_SPS = hpm_to_sps(MOTOR_MAX_VEL_HPM);
 
 static constexpr i32 MOTOR_HOMING_VEL_HPM = 1000;
 static constexpr i32 MOTOR_HOMING_VEL_SPS = hpm_to_sps(MOTOR_HOMING_VEL_HPM);
@@ -117,8 +119,10 @@ static constexpr i32 MOTOR_MAX_ACC = 100000;
 static constexpr i32 START_POS_HUNDRETHS = 100;
 static constexpr i32 START_POS_STEPS = hundreths_to_steps(START_POS_HUNDRETHS);
 
-static constexpr i32 MOTOR_MAX_POS_HUNDRETHS = 10000;
+static constexpr i32 MOTOR_MAX_POS_HUNDRETHS = 437;  // 4.37 inches on slide
 static constexpr i32 MOTOR_MAX_POS_STEPS = hundreths_to_steps(MOTOR_MAX_POS_HUNDRETHS);
+
+static constexpr i32 DEFAULT_MOTOR_VEL_HPM = 1000;
 
 bool is_homed = false;
 bool in_estop = false;
@@ -137,10 +141,14 @@ u32 last_estop_dbg_millis = 0;
 i32 job_target_steps = 0;
 // Jog speed in hundreths of an inch per minute
 u16 speed = 0;
+u16 manual_sr_index = 0;
+volatile u32 stop_sr_delay = 0;
+volatile u32 sr_start_timeout = 0;
+volatile u32 sr_finish_timeout = 0;
 
 ModBussy mb(502, coils, discretes, holding, input);
 
-void print_motor_alerts();
+void print_motor_alerts(MotorDriver &Motor);
 void ethernet_setup(bool use_dhcp, const IPAddress &ip, u16 max_dhcp_attempts);
 State state_machine_iter(State state_in);
 bool estop_conditions_met();
@@ -150,6 +158,8 @@ State estop_resume_state(State state_in);
 bool latch_handler(u16 offset);
 void ConfigurePeriodicInterrupt(uint32_t frequencyHz);
 MotorWaitResult wait_for_motor_motion(MotorDriver &Motor);
+MotorWaitResult wait_for_motor_motion(DummyMotor &Motor);
+void print_motor_alerts(DummyMotor &Motor);
 extern "C" void TCC2_0_Handler(void) __attribute__((
             alias("PeriodicInterrupt")));
 
@@ -182,8 +192,10 @@ int main() {
     mb.Coil(RESET_CYCLE_LATCH_OFFSET, false);
     mb.Coil(ERROR_OFFSET, false);
     mb.Coil(JOB_MOVING_OFFSET, false);
-    mb.Coil(JOB_WAITING_OFFSET, false);
+    mb.Coil(JOB_SR_ACTIVE_OFFSET, false);
     mb.Coil(SET_ESTOP_OFFSET, false);
+    mb.Coil(ARM_ENABLE_OFFSET, false);
+    mb.Coil(EXECUTE_SR_LATCH_OFFSET, false);
 
     MotorMgr.MotorInputClocking(MotorManager::CLOCK_RATE_NORMAL);
     MotorMgr.MotorModeSet(MotorManager::MOTOR_ALL, Connector::CPM_MODE_STEP_AND_DIR);
@@ -194,24 +206,25 @@ int main() {
     CARRIAGE_MOTOR.AccelMax(MOTOR_MAX_ACC);
     CARRIAGE_MOTOR.VelMax(MOTOR_MAX_VEL_SPS);
 
-
-    mb.Hreg(SPEED_OFFSET) = 100;
+    mb.Hreg(SPEED_OFFSET) = DEFAULT_MOTOR_VEL_HPM;
 
     while (true) {
         mb.task();
         mb.Coil(IS_HOMED_OFFSET, is_homed);
         mb.Coil(IN_ESTOP_OFFSET, in_estop);
         mb.Coil(ERROR_OFFSET, machine_state == State::ERROR_STATE);
+        const bool job_sr_active = (
+                machine_state == State::JOB_START_SR ||
+                machine_state == State::JOB_WAIT_SR_START ||
+                machine_state == State::JOB_WAIT_SR_FINISH);
         mb.Coil(JOB_ACTIVE_OFFSET,
-            machine_state == State::JOB_WAIT_DELAY
-            || machine_state == State::JOB_CALC_NEXT_POSITION
-            || machine_state == State::JOB_WAIT_POSITION);
+                job_sr_active || machine_state == State::JOB_CALC_NEXT_POSITION
+                || machine_state == State::JOB_WAIT_POSITION);
         mb.Coil(JOB_MOVING_OFFSET, machine_state == State::JOB_WAIT_POSITION);
-        mb.Coil(JOB_WAITING_OFFSET, machine_state == State::JOB_WAIT_DELAY);
+        mb.Coil(JOB_SR_ACTIVE_OFFSET, job_sr_active);
 
         mb.Hreg(MACHINE_STATE_OFFSET) = static_cast<u16>(machine_state);
         mb.Hreg(CURRENT_POSITION_INDEX_OFFSET) = cycle_target_index;
-        mb.Hreg(DELAY_REMAINING_OFFSET) = static_cast<u16>(delay_countdown/100);
         if (is_homed) {
             mb.Hreg(CURRENT_POSITION_OFFSET) = steps_to_hundreths(CARRIAGE_MOTOR.PositionRefCommanded());
         } else {
@@ -222,18 +235,29 @@ int main() {
 
 
         const u16 temp_speed = mb.Hreg(SPEED_OFFSET);
-        if (temp_speed > MOTOR_MAX_VEL_HPM) {
-            speed = MOTOR_MAX_VEL_HPM;
-            mb.Hreg(SPEED_OFFSET) = MOTOR_MAX_VEL_HPM;
-        } else {
-            speed = temp_speed;
+        if(speed != temp_speed) {
+            if (temp_speed > MOTOR_MAX_VEL_HPM) {
+                PRINT("New speed out of bounds, capping at ");
+                PRINT(MOTOR_MAX_VEL_HPM);
+                PRINTLN(" hundreths per minute");
+                speed = MOTOR_MAX_VEL_HPM;
+                mb.Hreg(SPEED_OFFSET) = MOTOR_MAX_VEL_HPM;
+            } else {
+                PRINT("New speed: ");
+                PRINT(temp_speed);
+                PRINTLN(" hundreths per minute");
+                speed = temp_speed;
+                CARRIAGE_MOTOR.VelMax(speed);
+            }
         }
+
 
         home_latched = latch_handler(HOME_LATCH_OFFSET);
         start_cycle_latched = latch_handler(START_CYCLE_LATCH_OFFSET);
         stop_cycle_latched = latch_handler(STOP_CYCLE_LATCH_OFFSET);
         go_to_position_latched = latch_handler(GO_TO_POSITION_LATCH_OFFSET);
         reset_cycle_latched = latch_handler(RESET_CYCLE_LATCH_OFFSET);
+        execute_sr_latched = latch_handler(EXECUTE_SR_LATCH_OFFSET);
 
         mb.Hreg(CURRENT_POSITION_INDEX_OFFSET) = cycle_target_index;
 
@@ -294,6 +318,13 @@ State state_machine_iter(const State state_in) {
                 PRINTLN("Cycle reset");
                 return State::IDLE;
             }
+            if (execute_sr_latched) {
+                if (is_homed) {
+                    return State::MANUAL_EXECUTE_SR;
+                } else {
+                    PRINTLN("Can't execute SR, not homed");
+                }
+            }
             if (home_latched) {
                 PRINTLN("Homing");
 
@@ -321,7 +352,7 @@ State state_machine_iter(const State state_in) {
             }
             if (CARRIAGE_MOTOR.StatusReg().bit.AlertsPresent) {
                 PRINTLN("Motor alert during homing");
-                print_motor_alerts();
+                print_motor_alerts(CARRIAGE_MOTOR);
                 is_homed = false;
                 estop();
                 return State::ESTOP_START;
@@ -376,7 +407,7 @@ State state_machine_iter(const State state_in) {
             }
         }
         case State::MANUAL_GO_TO_POSITION: {
-            manual_target_pos_index = mb.Hreg(SELECTED_POSITION_OFFSET);
+            manual_target_pos_index = mb.Hreg(SELECTED_STATION_OFFSET);
             PRINT("going to position index ");
             PRINTLN(manual_target_pos_index);
             if (manual_target_pos_index >= NUM_POSITIONS) {
@@ -435,10 +466,46 @@ State state_machine_iter(const State state_in) {
             }
         }
         case State::MANUAL_EXECUTE_SR: {
-            return State::MANUAL_EXECUTE_SR_WAIT;
+            const u16 station_idx = mb.Hreg(SELECTED_STATION_OFFSET);
+            manual_sr_index = mb.Hreg(SUBROUTINE_OFFSET + station_idx);
+            mb.Hreg(CURRENT_SUBROUTINE_OFFSET) = manual_sr_index;
+            mb.Coil(ARM_ENABLE_OFFSET, true);
+            sr_start_timeout = 1000;
+            return State::MANUAL_EXECUTE_SR_WAIT_START;
         }
-        case State::MANUAL_EXECUTE_SR_WAIT: {
-            return State::IDLE;
+        case State::MANUAL_EXECUTE_SR_WAIT_START: {
+            if (mb.Coil(ARM_RUNNING_OFFSET)) {
+                PRINTLN("Arm confirms job");
+                sr_finish_timeout = 60000;
+                return State::MANUAL_EXECUTE_SR_WAIT_FINISH;
+            }
+            if (sr_start_timeout == 0) {
+                PRINTLN("SR start timeout. Arm is not responding");
+                mb.Coil(ARM_ENABLE_OFFSET, false);
+                stop_sr_delay = 1000;
+                return State::STOP_SR_DELAY;
+            }
+            return State::MANUAL_EXECUTE_SR_WAIT_START;
+        }
+        case State::MANUAL_EXECUTE_SR_WAIT_FINISH: {
+            if (stop_cycle_latched) {
+                PRINTLN("Stop manual SR");
+                mb.Coil(ARM_ENABLE_OFFSET, false);
+                stop_sr_delay = 1000;
+                return State::STOP_SR_DELAY;
+            }
+            if (!mb.Coil(ARM_RUNNING_OFFSET)) {
+                PRINTLN("SR finished");
+                mb.Coil(ARM_ENABLE_OFFSET, false);
+                return State::IDLE;
+            }
+            if (sr_finish_timeout == 0) {
+                PRINTLN("SR finish timeout. Arm is not responding");
+                mb.Coil(ARM_ENABLE_OFFSET, false);
+                estop(); // arm is unresponsive and preports to be moving
+                return State::ERROR_STATE;
+            }
+            return State::MANUAL_EXECUTE_SR_WAIT_FINISH;
         }
         case State::JOB_CALC_NEXT_POSITION: {
             if (stop_cycle_latched) {
@@ -513,12 +580,11 @@ State state_machine_iter(const State state_in) {
                 case MotorWaitResult::DONE: {
                     PRINT("Motor reached position ");
                     PRINTLN(cycle_target_index);
-                    delay_countdown = 1000;
-                    return State::JOB_WAIT_DELAY;
+                    return State::JOB_START_SR;
                 }
                 case MotorWaitResult::ERROR: {
                     PRINTLN("Motor error during cycle");
-                    print_motor_alerts();
+                    print_motor_alerts(CARRIAGE_MOTOR);
                     estop();
                     return State::ERROR_STATE;
                 }
@@ -550,20 +616,66 @@ State state_machine_iter(const State state_in) {
             }
             return State::JOB_WAIT_POSITION;
         }
-        case State::JOB_WAIT_DELAY: {
+        case State::JOB_START_SR: {
             if (stop_cycle_latched) {
                 PRINTLN("Stopping cycle");
                 return State::IDLE;
             }
-            if (delay_countdown == 0) {
+            sr_start_timeout = 1000;
+            const u16 sr_index = mb.Hreg(SUBROUTINE_OFFSET + cycle_target_index);
+            mb.Hreg(CURRENT_SUBROUTINE_OFFSET) = sr_index;
+            mb.Coil(ARM_ENABLE_OFFSET, true);
+            return State::JOB_WAIT_SR_START;
+        }
+
+        case State::JOB_WAIT_SR_START: {
+            if(stop_cycle_latched) {
+                PRINTLN("Stopping cycle");
+                mb.Coil(ARM_ENABLE_OFFSET, false);
+                stop_sr_delay = 1000;
+                return State::STOP_SR_DELAY;
+            }
+            if (mb.Coil(ARM_RUNNING_OFFSET)) {
+                PRINTLN("Arm confirms job");
+                sr_finish_timeout = 60000;
+                return State::JOB_WAIT_SR_FINISH;
+            }
+            if (sr_start_timeout == 0) {
+                PRINTLN("SR start timeout. Arm is not responding");
+                mb.Coil(ARM_ENABLE_OFFSET, false);
+                stop_sr_delay = 1000;
+                return State::STOP_SR_DELAY;
+            }
+            return State::JOB_WAIT_SR_START;
+        }
+
+        case State::JOB_WAIT_SR_FINISH: {
+            if(stop_cycle_latched) {
+                PRINTLN("Stopping cycle");
+                mb.Coil(ARM_ENABLE_OFFSET, false);
+                stop_sr_delay = 1000;
+                return State::STOP_SR_DELAY;
+            }
+            if (!mb.Coil(ARM_RUNNING_OFFSET)) {
+                PRINTLN("SR finished");
+                mb.Coil(ARM_ENABLE_OFFSET, false);
                 cycle_last_index = cycle_target_index;
                 return State::JOB_CALC_NEXT_POSITION;
             }
-            return State::JOB_WAIT_DELAY;
+            if(sr_finish_timeout == 0){
+                PRINTLN("SR finish timeout. Arm is not responding");
+                mb.Coil(ARM_ENABLE_OFFSET, false);
+                stop_sr_delay = 1000;
+                return State::STOP_SR_DELAY;
+            }
+            return State::JOB_WAIT_SR_FINISH;
         }
 
-        case State::JOB_STOP_DELAY: {
-            return State::IDLE;
+        case State::STOP_SR_DELAY: {
+            if (stop_sr_delay == 0) {
+                return State::IDLE;
+            }
+            return State::STOP_SR_DELAY;
         }
 
 
@@ -611,9 +723,19 @@ State state_machine_iter(const State state_in) {
  * Interrupt handler gets automatically called every ms
  */
 extern "C" void PeriodicInterrupt(void) {
-    if (machine_state == State::JOB_WAIT_DELAY) {
-        if (delay_countdown > 0) {
-            delay_countdown--;
+    if (machine_state == State::STOP_SR_DELAY) {
+        if (stop_sr_delay > 0) {
+            stop_sr_delay--;
+        }
+    }
+    if (machine_state == State::MANUAL_EXECUTE_SR_WAIT_START || machine_state == State::JOB_WAIT_SR_START) {
+        if (sr_start_timeout > 0) {
+            sr_start_timeout--;
+        }
+    }
+    if (machine_state == State::MANUAL_EXECUTE_SR_WAIT_FINISH || machine_state == State::JOB_WAIT_SR_FINISH) {
+        if (sr_finish_timeout > 0) {
+            sr_finish_timeout--;
         }
     }
     // Acknowledge the interrupt to clear the flag and wait for the next interrupt.
@@ -640,6 +762,7 @@ void estop() {
     last_estop_time = millis();
     last_state_before_estop = machine_state;
     machine_state = State::ESTOP_START;
+    mb.Coil(ARM_ENABLE_OFFSET, false);
     CARRIAGE_MOTOR.MoveStopAbrupt();
 }
 
@@ -727,20 +850,20 @@ void ethernet_setup(const bool use_dhcp, const IPAddress &ip, const u16 max_dhcp
  *
  * @pre requires "CARRIAGE_MOTOR" to be defined as a ClearCore motor connector
  */
-void print_motor_alerts(){
+void print_motor_alerts(MotorDriver &Motor){
     // report status of alerts
     PRINTLN("ClearPath Alerts present: ");
-    if(CARRIAGE_MOTOR.AlertReg().bit.MotionCanceledInAlert){
+    if(Motor.AlertReg().bit.MotionCanceledInAlert){
         PRINTLN("    MotionCanceledInAlert "); }
-    if(CARRIAGE_MOTOR.AlertReg().bit.MotionCanceledPositiveLimit){
+    if(Motor.AlertReg().bit.MotionCanceledPositiveLimit){
         PRINTLN("    MotionCanceledPositiveLimit "); }
-    if(CARRIAGE_MOTOR.AlertReg().bit.MotionCanceledNegativeLimit){
+    if(Motor.AlertReg().bit.MotionCanceledNegativeLimit){
         PRINTLN("    MotionCanceledNegativeLimit "); }
-    if(CARRIAGE_MOTOR.AlertReg().bit.MotionCanceledSensorEStop){
+    if(Motor.AlertReg().bit.MotionCanceledSensorEStop){
         PRINTLN("    MotionCanceledSensorEStop "); }
-    if(CARRIAGE_MOTOR.AlertReg().bit.MotionCanceledMotorDisabled){
+    if(Motor.AlertReg().bit.MotionCanceledMotorDisabled){
         PRINTLN("    MotionCanceledMotorDisabled "); }
-    if(CARRIAGE_MOTOR.AlertReg().bit.MotorFaulted){
+    if(Motor.AlertReg().bit.MotorFaulted){
         PRINTLN("    MotorFaulted ");
     }
 }
@@ -766,6 +889,13 @@ MotorWaitResult wait_for_motor_motion(MotorDriver &Motor) {
     return MotorWaitResult::NOT_DONE;
 }
 
+MotorWaitResult wait_for_motor_motion(DummyMotor &Motor) {
+    return MotorWaitResult::DONE;
+}
+void print_motor_alerts(DummyMotor &Motor) {
+    PRINTLN("No alerts present");
+}
+
 const char* state_name(const State state_in) {
     switch (state_in) {
         case State::IDLE: return "IDLE";
@@ -776,12 +906,15 @@ const char* state_name(const State state_in) {
         case State::MANUAL_GO_TO_POSITION: return "MANUAL_GO_TO_POSITION";
         case State::MANUAL_GO_TO_POSITION_WAIT: return "MANUAL_GO_TO_POSITION_WAIT";
         case State::MANUAL_EXECUTE_SR: return "MANUAL_EXECUTE_SR";
-        case State::MANUAL_EXECUTE_SR_WAIT: return "MANUAL_EXECUTE_SR_WAIT";
+        case State::MANUAL_EXECUTE_SR_WAIT_START: return "MANUAL_EXECUTE_SR_WAIT_START";
+        case State::MANUAL_EXECUTE_SR_WAIT_FINISH: return "MANUAL_EXECUTE_SR_WAIT_FINISH";
         case State::JOB_CALC_NEXT_POSITION: return "JOB_CALC_NEXT_POSITION";
         case State::JOB_MOVE_NEXT_POSITION: return "JOB_MOVE_NEXT_POSITION";
         case State::JOB_WAIT_POSITION: return "JOB_WAIT_POSITION";
-        case State::JOB_WAIT_DELAY: return "JOB_WAIT_DELAY";
-        case State::JOB_STOP_DELAY: return "JOB_STOP_DELAY";
+        case State::JOB_START_SR: return "JOB_START_SR";
+        case State::JOB_WAIT_SR_START: return "JOB_WAIT_SR_START";
+        case State::JOB_WAIT_SR_FINISH: return "JOB_WAIT_SR_FINISH";
+        case State::STOP_SR_DELAY: return "STOP_SR_DELAY";
         case State::ESTOP_START: return "ESTOP_START";
         case State::ESTOP: return "ESTOP";
         case State::ERROR_STATE: return "ERROR_STATE";
@@ -795,24 +928,20 @@ State estop_resume_state(const State state_in) {
         case State::IDLE:
         case State::START_HOMING:
         case State::WAIT_FOR_HOMING:
-            return State::IDLE;
         case State::RETURN_TO_START:
         case State::WAIT_FOR_RETURN_TO_START:
-            return State::RETURN_TO_START;
         case State::MANUAL_GO_TO_POSITION:
         case State::MANUAL_GO_TO_POSITION_WAIT:
-            return State::MANUAL_GO_TO_POSITION;
         case State::MANUAL_EXECUTE_SR:
-        case State::MANUAL_EXECUTE_SR_WAIT:
-            return State::IDLE;
+        case State::MANUAL_EXECUTE_SR_WAIT_START:
+        case State::MANUAL_EXECUTE_SR_WAIT_FINISH:
         case State::JOB_CALC_NEXT_POSITION:
-            return State::JOB_CALC_NEXT_POSITION;
         case State::JOB_MOVE_NEXT_POSITION:
         case State::JOB_WAIT_POSITION:
-            return State::JOB_MOVE_NEXT_POSITION;
-        case State::JOB_WAIT_DELAY:
-            return State::JOB_WAIT_DELAY;
-        case State::JOB_STOP_DELAY:
+        case State::JOB_START_SR:
+        case State::JOB_WAIT_SR_START:
+        case State::JOB_WAIT_SR_FINISH:
+        case State::STOP_SR_DELAY:
             return State::IDLE;
         case State::ESTOP_START:
         case State::ESTOP:
