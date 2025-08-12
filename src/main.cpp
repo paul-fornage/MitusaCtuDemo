@@ -38,14 +38,16 @@ static constexpr u16 NUM_POSITIONS = 16;
 // Hregs
 static constexpr u16 CURRENT_SUBROUTINE_OFFSET = 8; // sr index read by arm
 static constexpr u16 SELECTED_STATION_OFFSET = 10; // position to go to when GO_TO_POSITION_LATCH is latched
-static constexpr u16 CURRENT_POSITION_INDEX_OFFSET = 11;
-static constexpr u16 SPEED_OFFSET = 12;
-static constexpr u16 CURRENT_POSITION_OFFSET = 13;
-static constexpr u16 MACHINE_STATE_OFFSET = 14;
-static constexpr u16 POSITIONS_OFFSET = 16;
-static constexpr u16 SUBROUTINE_OFFSET = POSITIONS_OFFSET + NUM_POSITIONS;
+static constexpr u16 CURRENT_POSITION_INDEX_OFFSET = 11; // cycle target index
+static constexpr u16 SPEED_OFFSET = 12; // speed in hundreths of an inch / minute
+static constexpr u16 CURRENT_POSITION_OFFSET = 13; // current position in hundreths of an inch
+static constexpr u16 MACHINE_STATE_OFFSET = 14; // machine_state
+static constexpr u16 POSITIONS_OFFSET = 16; // offset for the first position in hundreths
+static constexpr u16 SUBROUTINE_OFFSET = POSITIONS_OFFSET + NUM_POSITIONS; // offset for the first SR
 
 // Coils
+static constexpr u16 MANUAL_SR_ACTIVE_OFFSET = 5;
+static constexpr u16 MANUAL_SR_CANCEL_LATCH_OFFSET = 6;
 static constexpr u16 EXECUTE_SR_LATCH_OFFSET = 7; // Sub-routine input latch. not an EE 'SR latch'
 static constexpr u16 ARM_ENABLE_OFFSET = 8;
 static constexpr u16 ARM_RUNNING_OFFSET = 9;
@@ -69,6 +71,7 @@ bool stop_cycle_latched = false;
 bool go_to_position_latched = false;
 bool reset_cycle_latched = false;
 bool execute_sr_latched = false;
+bool manual_sr_cancel_latched = false;
 
 enum class MotorWaitResult {
     DONE,
@@ -196,6 +199,8 @@ int main() {
     mb.Coil(SET_ESTOP_OFFSET, false);
     mb.Coil(ARM_ENABLE_OFFSET, false);
     mb.Coil(EXECUTE_SR_LATCH_OFFSET, false);
+    mb.Coil(MANUAL_SR_ACTIVE_OFFSET, false);
+    mb.Coil(MANUAL_SR_CANCEL_LATCH_OFFSET, false);
 
     MotorMgr.MotorInputClocking(MotorManager::CLOCK_RATE_NORMAL);
     MotorMgr.MotorModeSet(MotorManager::MOTOR_ALL, Connector::CPM_MODE_STEP_AND_DIR);
@@ -222,6 +227,9 @@ int main() {
                 || machine_state == State::JOB_WAIT_POSITION);
         mb.Coil(JOB_MOVING_OFFSET, machine_state == State::JOB_WAIT_POSITION);
         mb.Coil(JOB_SR_ACTIVE_OFFSET, job_sr_active);
+        mb.Coil(MANUAL_SR_ACTIVE_OFFSET, machine_state == State::MANUAL_EXECUTE_SR
+            || machine_state == State::MANUAL_EXECUTE_SR_WAIT_START
+            || machine_state == State::MANUAL_EXECUTE_SR_WAIT_FINISH);
 
         mb.Hreg(MACHINE_STATE_OFFSET) = static_cast<u16>(machine_state);
         mb.Hreg(CURRENT_POSITION_INDEX_OFFSET) = cycle_target_index;
@@ -258,8 +266,8 @@ int main() {
         go_to_position_latched = latch_handler(GO_TO_POSITION_LATCH_OFFSET);
         reset_cycle_latched = latch_handler(RESET_CYCLE_LATCH_OFFSET);
         execute_sr_latched = latch_handler(EXECUTE_SR_LATCH_OFFSET);
+        manual_sr_cancel_latched = latch_handler(MANUAL_SR_CANCEL_LATCH_OFFSET);
 
-        mb.Hreg(CURRENT_POSITION_INDEX_OFFSET) = cycle_target_index;
 
         if (estop_conditions_met() && !in_estop) {
             PRINTLN("ESTOP triggered");
@@ -485,10 +493,16 @@ State state_machine_iter(const State state_in) {
                 stop_sr_delay = 1000;
                 return State::STOP_SR_DELAY;
             }
+            if (manual_sr_cancel_latched) {
+                PRINTLN("SR cancel latched while waiting for arm to confirm receipt of SR. Stopping SR");
+                mb.Coil(ARM_ENABLE_OFFSET, false);
+                stop_sr_delay = 1000;
+                return State::STOP_SR_DELAY;
+            }
             return State::MANUAL_EXECUTE_SR_WAIT_START;
         }
         case State::MANUAL_EXECUTE_SR_WAIT_FINISH: {
-            if (stop_cycle_latched) {
+            if (manual_sr_cancel_latched) {
                 PRINTLN("Stop manual SR");
                 mb.Coil(ARM_ENABLE_OFFSET, false);
                 stop_sr_delay = 1000;
@@ -673,6 +687,13 @@ State state_machine_iter(const State state_in) {
 
         case State::STOP_SR_DELAY: {
             if (stop_sr_delay == 0) {
+                if (mb.Coil(ARM_RUNNING_OFFSET)) {
+                    PRINTLN("SR was supposed to be stopped, but it's not. "
+                            "Trying to stop again, and then declaring unrecoverable error");
+                    mb.Coil(ARM_ENABLE_OFFSET, false);
+                    estop();
+                    return State::ERROR_STATE;
+                }
                 return State::IDLE;
             }
             return State::STOP_SR_DELAY;
