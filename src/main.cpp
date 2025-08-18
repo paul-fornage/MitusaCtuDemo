@@ -46,6 +46,7 @@ static constexpr u16 POSITIONS_OFFSET = 16; // offset for the first position in 
 static constexpr u16 SUBROUTINE_OFFSET = POSITIONS_OFFSET + NUM_POSITIONS; // offset for the first SR
 
 // Coils
+static constexpr u16 PROGRAM_SELECT_OFFSET = 4;
 static constexpr u16 MANUAL_SR_ACTIVE_OFFSET = 5;
 static constexpr u16 MANUAL_SR_CANCEL_LATCH_OFFSET = 6;
 static constexpr u16 EXECUTE_SR_LATCH_OFFSET = 7; // Sub-routine input latch. not an EE 'SR latch'
@@ -201,6 +202,7 @@ int main() {
     mb.Coil(EXECUTE_SR_LATCH_OFFSET, false);
     mb.Coil(MANUAL_SR_ACTIVE_OFFSET, false);
     mb.Coil(MANUAL_SR_CANCEL_LATCH_OFFSET, false);
+    mb.Coil(PROGRAM_SELECT_OFFSET, false);
 
     MotorMgr.MotorInputClocking(MotorManager::CLOCK_RATE_NORMAL);
     MotorMgr.MotorModeSet(MotorManager::MOTOR_ALL, Connector::CPM_MODE_STEP_AND_DIR);
@@ -218,14 +220,18 @@ int main() {
         mb.Coil(IS_HOMED_OFFSET, is_homed);
         mb.Coil(IN_ESTOP_OFFSET, in_estop);
         mb.Coil(ERROR_OFFSET, machine_state == State::ERROR_STATE);
-        const bool job_sr_active = (
-                machine_state == State::JOB_START_SR ||
-                machine_state == State::JOB_WAIT_SR_START ||
-                machine_state == State::JOB_WAIT_SR_FINISH);
+        const bool job_sr_active = (machine_state == State::JOB_START_SR
+                                    || machine_state == State::JOB_WAIT_SR_START
+                                    || machine_state == State::JOB_WAIT_SR_FINISH);
+        const bool job_moving = (machine_state == State::JOB_CALC_NEXT_POSITION
+                                 || machine_state == State::JOB_MOVE_NEXT_POSITION
+                                 || machine_state == State::JOB_WAIT_POSITION);
+        const bool manual_sr_active = (machine_state == State::MANUAL_EXECUTE_SR
+                                       || machine_state == State::MANUAL_EXECUTE_SR_WAIT_START
+                                       || machine_state == State::MANUAL_EXECUTE_SR_WAIT_FINISH);
         mb.Coil(JOB_ACTIVE_OFFSET,
-                job_sr_active || machine_state == State::JOB_CALC_NEXT_POSITION
-                || machine_state == State::JOB_WAIT_POSITION);
-        mb.Coil(JOB_MOVING_OFFSET, machine_state == State::JOB_WAIT_POSITION);
+                job_sr_active || job_moving);
+        mb.Coil(JOB_MOVING_OFFSET, job_moving);
         mb.Coil(JOB_SR_ACTIVE_OFFSET, job_sr_active);
         mb.Coil(MANUAL_SR_ACTIVE_OFFSET, machine_state == State::MANUAL_EXECUTE_SR
             || machine_state == State::MANUAL_EXECUTE_SR_WAIT_START
@@ -280,6 +286,16 @@ int main() {
             PRINT("\thmi_commands_estop: ");
             PRINTLN(hmi_commands_estop?"TRUE":"FALSE");
             estop();
+        }
+
+        if (!job_sr_active &&
+            !manual_sr_active &&
+            (mb.Coil(PROGRAM_SELECT_OFFSET) || mb.Coil(ARM_ENABLE_OFFSET))
+        ) {
+            PRINTLN("Program select or arm enable true while not in SR");
+            estop();
+            mb.Coil(PROGRAM_SELECT_OFFSET, false);
+            mb.Coil(ARM_ENABLE_OFFSET, false);
         }
 
         last_state = machine_state;
@@ -474,6 +490,7 @@ State state_machine_iter(const State state_in) {
             }
         }
         case State::MANUAL_EXECUTE_SR: {
+            mb.Coil(PROGRAM_SELECT_OFFSET, true);
             const u16 station_idx = mb.Hreg(SELECTED_STATION_OFFSET);
             manual_sr_index = mb.Hreg(SUBROUTINE_OFFSET + station_idx);
             mb.Hreg(CURRENT_SUBROUTINE_OFFSET) = manual_sr_index;
@@ -485,17 +502,20 @@ State state_machine_iter(const State state_in) {
             if (mb.Coil(ARM_RUNNING_OFFSET)) {
                 PRINTLN("Arm confirms job");
                 sr_finish_timeout = 60000;
+                mb.Coil(PROGRAM_SELECT_OFFSET, false);
                 return State::MANUAL_EXECUTE_SR_WAIT_FINISH;
             }
             if (sr_start_timeout == 0) {
                 PRINTLN("SR start timeout. Arm is not responding");
                 mb.Coil(ARM_ENABLE_OFFSET, false);
+                mb.Coil(PROGRAM_SELECT_OFFSET, false);
                 stop_sr_delay = 1000;
                 return State::STOP_SR_DELAY;
             }
             if (manual_sr_cancel_latched) {
                 PRINTLN("SR cancel latched while waiting for arm to confirm receipt of SR. Stopping SR");
                 mb.Coil(ARM_ENABLE_OFFSET, false);
+                mb.Coil(PROGRAM_SELECT_OFFSET, false);
                 stop_sr_delay = 1000;
                 return State::STOP_SR_DELAY;
             }
@@ -633,8 +653,10 @@ State state_machine_iter(const State state_in) {
         case State::JOB_START_SR: {
             if (stop_cycle_latched) {
                 PRINTLN("Stopping cycle");
+                mb.Coil(PROGRAM_SELECT_OFFSET, false);
                 return State::IDLE;
             }
+            mb.Coil(PROGRAM_SELECT_OFFSET, true);
             sr_start_timeout = 1000;
             const u16 sr_index = mb.Hreg(SUBROUTINE_OFFSET + cycle_target_index);
             mb.Hreg(CURRENT_SUBROUTINE_OFFSET) = sr_index;
@@ -646,17 +668,20 @@ State state_machine_iter(const State state_in) {
             if(stop_cycle_latched) {
                 PRINTLN("Stopping cycle");
                 mb.Coil(ARM_ENABLE_OFFSET, false);
+                mb.Coil(PROGRAM_SELECT_OFFSET, false);
                 stop_sr_delay = 1000;
                 return State::STOP_SR_DELAY;
             }
             if (mb.Coil(ARM_RUNNING_OFFSET)) {
                 PRINTLN("Arm confirms job");
+                mb.Coil(PROGRAM_SELECT_OFFSET, false);
                 sr_finish_timeout = 60000;
                 return State::JOB_WAIT_SR_FINISH;
             }
             if (sr_start_timeout == 0) {
                 PRINTLN("SR start timeout. Arm is not responding");
                 mb.Coil(ARM_ENABLE_OFFSET, false);
+                mb.Coil(PROGRAM_SELECT_OFFSET, false);
                 stop_sr_delay = 1000;
                 return State::STOP_SR_DELAY;
             }
@@ -784,6 +809,7 @@ void estop() {
     last_state_before_estop = machine_state;
     machine_state = State::ESTOP_START;
     mb.Coil(ARM_ENABLE_OFFSET, false);
+    mb.Coil(PROGRAM_SELECT_OFFSET, false);
     CARRIAGE_MOTOR.MoveStopAbrupt();
 }
 
