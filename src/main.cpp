@@ -27,6 +27,9 @@
 #define ESTOP_CON_SAFE_STATE true
 #define ESTOP_SAFE (ESTOP_CONNECTOR.State() == ESTOP_CON_SAFE_STATE)
 
+#define ESTOP_OUT_CONNECTOR ConnectorIO5
+#define INVERT_ESTOP_OUT false
+
 /// Interrupt priority for the periodic interrupt. 0 is highest priority, 7 is lowest.
 #define PERIODIC_INTERRUPT_PRIORITY 5
 
@@ -163,6 +166,7 @@ bool latch_handler(u16 offset);
 void ConfigurePeriodicInterrupt(uint32_t frequencyHz);
 MotorWaitResult wait_for_motor_motion(MotorDriver &Motor);
 MotorWaitResult wait_for_motor_motion(DummyMotor &Motor);
+void set_estop_out(bool new_state);
 void print_motor_alerts(DummyMotor &Motor);
 extern "C" void TCC2_0_Handler(void) __attribute__((
             alias("PeriodicInterrupt")));
@@ -173,6 +177,7 @@ auto last_state = State::IDLE;
 
 int main() {
     ESTOP_CONNECTOR.Mode(Connector::INPUT_DIGITAL);
+    ESTOP_OUT_CONNECTOR.Mode(Connector::OUTPUT_DIGITAL);
     ConnectorUsb.PortOpen();
     ConnectorUsb.Speed(115200);
     const u32 startTime = millis();
@@ -247,6 +252,7 @@ int main() {
 
         hmi_commands_estop = mb.Coil(SET_ESTOP_OFFSET);
 
+        set_estop_out(in_estop);
 
         const u16 temp_speed = mb.Hreg(SPEED_OFFSET);
         if(speed != temp_speed) {
@@ -811,6 +817,10 @@ void estop() {
     mb.Coil(ARM_ENABLE_OFFSET, false);
     mb.Coil(PROGRAM_SELECT_OFFSET, false);
     CARRIAGE_MOTOR.MoveStopAbrupt();
+}
+
+void set_estop_out(bool new_state){
+    ESTOP_OUT_CONNECTOR.State(static_cast<bool>(new_state ^ INVERT_ESTOP_OUT));
 }
 
 
