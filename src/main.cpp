@@ -99,14 +99,16 @@ enum class State : u16{
     MANUAL_GO_TO_POSITION,
     MANUAL_GO_TO_POSITION_WAIT,
     MANUAL_EXECUTE_SR,
+    MANUAL_EXECUTE_SR_START_SETTLE,
     MANUAL_EXECUTE_SR_WAIT_START,
     MANUAL_EXECUTE_SR_WAIT_FINISH,
     JOB_CALC_NEXT_POSITION,
     JOB_MOVE_NEXT_POSITION = 16,
     JOB_WAIT_POSITION = 17,
     JOB_START_SR = 18,
-    JOB_WAIT_SR_START = 19,
-    JOB_WAIT_SR_FINISH = 20,
+    JOB_START_SR_SETTLE,
+    JOB_WAIT_SR_START,
+    JOB_WAIT_SR_FINISH,
     JOB_WAIT_SR_COOLDOWN,
     STOP_SR_DELAY,
     ESTOP_START,
@@ -152,6 +154,7 @@ volatile u32 stop_sr_delay = 0;
 volatile u32 sr_start_timeout = 0;
 volatile u32 sr_finish_timeout = 0;
 volatile u32 sr_cooldown_timeout = 0;
+volatile u32 start_settle_timeout = 0;
 
 ModBussy mb(502, coils, discretes, holding, input);
 
@@ -226,15 +229,17 @@ int main() {
         mb.Coil(IN_ESTOP_OFFSET, in_estop);
         mb.Coil(ERROR_OFFSET, machine_state == State::ERROR_STATE);
         const bool job_sr_active = (machine_state == State::JOB_START_SR
+                                    || machine_state == State::JOB_START_SR_SETTLE
                                     || machine_state == State::JOB_WAIT_SR_START
                                     || machine_state == State::JOB_WAIT_SR_FINISH
                                     || machine_state == State::JOB_WAIT_SR_COOLDOWN);
         const bool job_moving = (machine_state == State::JOB_CALC_NEXT_POSITION
-                                 || machine_state == State::JOB_MOVE_NEXT_POSITION
-                                 || machine_state == State::JOB_WAIT_POSITION);
+                                || machine_state == State::JOB_MOVE_NEXT_POSITION
+                                || machine_state == State::JOB_WAIT_POSITION);
         const bool manual_sr_active = (machine_state == State::MANUAL_EXECUTE_SR
-                                       || machine_state == State::MANUAL_EXECUTE_SR_WAIT_START
-                                       || machine_state == State::MANUAL_EXECUTE_SR_WAIT_FINISH);
+                                    || machine_state == State::MANUAL_EXECUTE_SR_START_SETTLE
+                                    || machine_state == State::MANUAL_EXECUTE_SR_WAIT_START
+                                    || machine_state == State::MANUAL_EXECUTE_SR_WAIT_FINISH);
         mb.Coil(JOB_ACTIVE_OFFSET,
                 job_sr_active || job_moving);
         mb.Coil(JOB_MOVING_OFFSET, job_moving);
@@ -505,9 +510,16 @@ State state_machine_iter(const State state_in) {
             PRINT("SR IDX: ");
             PRINTLN(manual_sr_index);
             mb.Hreg(CURRENT_SUBROUTINE_OFFSET) = manual_sr_index;
-            mb.Coil(ARM_ENABLE_OFFSET, true);
-            sr_start_timeout = 1000;
-            return State::MANUAL_EXECUTE_SR_WAIT_START;
+            start_settle_timeout = 200;
+            return State::MANUAL_EXECUTE_SR_START_SETTLE;
+        }
+        case State::MANUAL_EXECUTE_SR_START_SETTLE: {
+            if(start_settle_timeout == 0) {
+                mb.Coil(ARM_ENABLE_OFFSET, true);
+                sr_start_timeout = 1000;
+                return State::MANUAL_EXECUTE_SR_WAIT_START;
+            }
+            return State::MANUAL_EXECUTE_SR_START_SETTLE;
         }
         case State::MANUAL_EXECUTE_SR_WAIT_START: {
             if (mb.Coil(ARM_RUNNING_OFFSET)) {
@@ -667,13 +679,21 @@ State state_machine_iter(const State state_in) {
                 return State::IDLE;
             }
             mb.Coil(PROGRAM_SELECT_OFFSET, true);
-            sr_start_timeout = 1000;
             const u16 sr_index = mb.Hreg(SUBROUTINE_OFFSET + cycle_target_index);
             PRINT("Executing SR #");
             PRINTLN(sr_index);
             mb.Hreg(CURRENT_SUBROUTINE_OFFSET) = sr_index;
-            mb.Coil(ARM_ENABLE_OFFSET, true);
-            return State::JOB_WAIT_SR_START;
+            start_settle_timeout = 200;
+            return State::JOB_START_SR_SETTLE;
+        }
+
+        case State::JOB_START_SR_SETTLE: {
+            if(start_settle_timeout == 0) {
+                sr_start_timeout = 1000;
+                mb.Coil(ARM_ENABLE_OFFSET, true);
+                return State::JOB_WAIT_SR_START;
+            }
+            return State::JOB_START_SR_SETTLE;
         }
 
         case State::JOB_WAIT_SR_START: {
@@ -790,12 +810,16 @@ State state_machine_iter(const State state_in) {
  * Interrupt handler gets automatically called every ms
  */
 extern "C" void PeriodicInterrupt(void) {
+    if(machine_state == State::MANUAL_EXECUTE_SR_START_SETTLE || machine_state == State::JOB_START_SR_SETTLE) {
+        if(start_settle_timeout > 0){
+            start_settle_timeout--;
+        }
+    }
     if (machine_state == State::JOB_WAIT_SR_COOLDOWN) {
         if (sr_cooldown_timeout > 0) {
             sr_cooldown_timeout--;
         }
     }
-
     if (machine_state == State::STOP_SR_DELAY) {
         if (stop_sr_delay > 0) {
             stop_sr_delay--;
@@ -984,12 +1008,14 @@ const char* state_name(const State state_in) {
         case State::MANUAL_GO_TO_POSITION: return "MANUAL_GO_TO_POSITION";
         case State::MANUAL_GO_TO_POSITION_WAIT: return "MANUAL_GO_TO_POSITION_WAIT";
         case State::MANUAL_EXECUTE_SR: return "MANUAL_EXECUTE_SR";
+        case State::MANUAL_EXECUTE_SR_START_SETTLE: return "MANUAL_EXECUTE_SR_START_SETTLE";
         case State::MANUAL_EXECUTE_SR_WAIT_START: return "MANUAL_EXECUTE_SR_WAIT_START";
         case State::MANUAL_EXECUTE_SR_WAIT_FINISH: return "MANUAL_EXECUTE_SR_WAIT_FINISH";
         case State::JOB_CALC_NEXT_POSITION: return "JOB_CALC_NEXT_POSITION";
         case State::JOB_MOVE_NEXT_POSITION: return "JOB_MOVE_NEXT_POSITION";
         case State::JOB_WAIT_POSITION: return "JOB_WAIT_POSITION";
         case State::JOB_START_SR: return "JOB_START_SR";
+        case State::JOB_START_SR_SETTLE: return "JOB_START_SR_SETTLE";
         case State::JOB_WAIT_SR_START: return "JOB_WAIT_SR_START";
         case State::JOB_WAIT_SR_FINISH: return "JOB_WAIT_SR_FINISH";
         case State::JOB_WAIT_SR_COOLDOWN: return "JOB_WAIT_SR_COOLDOWN";
@@ -1012,12 +1038,14 @@ State estop_resume_state(const State state_in) {
         case State::MANUAL_GO_TO_POSITION:
         case State::MANUAL_GO_TO_POSITION_WAIT:
         case State::MANUAL_EXECUTE_SR:
+        case State::MANUAL_EXECUTE_SR_START_SETTLE:
         case State::MANUAL_EXECUTE_SR_WAIT_START:
         case State::MANUAL_EXECUTE_SR_WAIT_FINISH:
         case State::JOB_CALC_NEXT_POSITION:
         case State::JOB_MOVE_NEXT_POSITION:
         case State::JOB_WAIT_POSITION:
         case State::JOB_START_SR:
+        case State::JOB_START_SR_SETTLE:
         case State::JOB_WAIT_SR_START:
         case State::JOB_WAIT_SR_FINISH:
         case State::JOB_WAIT_SR_COOLDOWN:
