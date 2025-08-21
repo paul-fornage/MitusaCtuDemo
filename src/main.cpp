@@ -107,6 +107,7 @@ enum class State : u16{
     JOB_START_SR = 18,
     JOB_WAIT_SR_START = 19,
     JOB_WAIT_SR_FINISH = 20,
+    JOB_WAIT_SR_COOLDOWN,
     STOP_SR_DELAY,
     ESTOP_START,
     ESTOP,
@@ -152,6 +153,7 @@ u16 manual_sr_index = 0;
 volatile u32 stop_sr_delay = 0;
 volatile u32 sr_start_timeout = 0;
 volatile u32 sr_finish_timeout = 0;
+volatile u32 sr_cooldown_timeout = 0;
 
 ModBussy mb(502, coils, discretes, holding, input);
 
@@ -702,10 +704,11 @@ State state_machine_iter(const State state_in) {
                 return State::STOP_SR_DELAY;
             }
             if (!mb.Coil(ARM_RUNNING_OFFSET)) {
-                PRINTLN("SR finished");
+                PRINTLN("SR finished move, moving to cooldown");
                 mb.Coil(ARM_ENABLE_OFFSET, false);
                 cycle_last_index = cycle_target_index;
-                return State::JOB_CALC_NEXT_POSITION;
+                sr_cooldown_timeout = 200;
+                return State::JOB_WAIT_SR_COOLDOWN;
             }
             if(sr_finish_timeout == 0){
                 PRINTLN("SR finish timeout. Arm is not responding");
@@ -714,6 +717,14 @@ State state_machine_iter(const State state_in) {
                 return State::STOP_SR_DELAY;
             }
             return State::JOB_WAIT_SR_FINISH;
+        }
+
+        case State::JOB_WAIT_SR_COOLDOWN: {
+            if (sr_cooldown_timeout == 0) {
+                PRINTLN("SR cooldown finished, next position");
+                return State::JOB_CALC_NEXT_POSITION;
+            }
+            return State::JOB_WAIT_SR_COOLDOWN;
         }
 
         case State::STOP_SR_DELAY: {
@@ -775,6 +786,12 @@ State state_machine_iter(const State state_in) {
  * Interrupt handler gets automatically called every ms
  */
 extern "C" void PeriodicInterrupt(void) {
+    if (machine_state == State::JOB_WAIT_SR_COOLDOWN) {
+        if (sr_cooldown_timeout > 0) {
+            sr_cooldown_timeout--;
+        }
+    }
+
     if (machine_state == State::STOP_SR_DELAY) {
         if (stop_sr_delay > 0) {
             stop_sr_delay--;
@@ -971,12 +988,13 @@ const char* state_name(const State state_in) {
         case State::JOB_START_SR: return "JOB_START_SR";
         case State::JOB_WAIT_SR_START: return "JOB_WAIT_SR_START";
         case State::JOB_WAIT_SR_FINISH: return "JOB_WAIT_SR_FINISH";
+        case State::JOB_WAIT_SR_COOLDOWN: return "JOB_WAIT_SR_COOLDOWN";
         case State::STOP_SR_DELAY: return "STOP_SR_DELAY";
         case State::ESTOP_START: return "ESTOP_START";
         case State::ESTOP: return "ESTOP";
         case State::ERROR_STATE: return "ERROR_STATE";
-        default: return "UNKNOWN_STATE";
     }
+    return "UNKNOWN_STATE";
 }
 
 
@@ -998,6 +1016,7 @@ State estop_resume_state(const State state_in) {
         case State::JOB_START_SR:
         case State::JOB_WAIT_SR_START:
         case State::JOB_WAIT_SR_FINISH:
+        case State::JOB_WAIT_SR_COOLDOWN:
         case State::STOP_SR_DELAY:
             return State::IDLE;
         case State::ESTOP_START:
