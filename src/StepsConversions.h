@@ -24,10 +24,10 @@ static_assert(round_to_nearest(-0.5) == -1, "round error");
 static_assert(round_to_nearest(-0.51) == -1, "round error");
 static_assert(round_to_nearest(-51) == -51, "round error");
 
-static constexpr i64 FIXED_BITS = 30;
+static constexpr i64 FIXED_BITS = 32;
 static constexpr i64 FIXED_DENOMINATOR = 1ll << FIXED_BITS;
 // hundreths to steps
-static constexpr f64 HTS_RATIO = 474.949440542709; // CTU: 474.949440542709 | Slide: 40.97
+static constexpr f64 HTS_RATIO = 13.4751185151138; // CTU: 13.4751185151138 | Slide: 40.97
 // hundreths to steps fixed fraction
 static constexpr i64 FIXED_HTS_RATIO = round_to_nearest(HTS_RATIO * FIXED_DENOMINATOR);
 // steps to hundreths
@@ -116,11 +116,11 @@ static_assert(hundreths_to_steps(VAL) == slow_hundreths_to_steps(VAL), "Step con
 static_assert(ABS(sps_to_hpm(hpm_to_sps(VAL)) - VAL) \
 <= 1, "Step conversion failed 1");  \
 static_assert(ABS(hpm_to_sps(sps_to_hpm(VAL)) - VAL) \
-    <= static_cast<i32>(round_to_nearest(HPM_TO_SPS_RATIO+1.0/2)), "Step conversion failed 2");  \
+    <= static_cast<i32>(round_to_nearest(HPM_TO_SPS_RATIO)), "Step conversion failed 2");  \
 static_assert(ABS(sps_to_hpm(VAL) - slow_sps_to_hpm(VAL)) \
-<= static_cast<i32>(round_to_nearest(HPM_TO_SPS_RATIO+1.0/2)), "Step conversion failed 3");  \
+<= static_cast<i32>((HPM_TO_SPS_RATIO)), "Step conversion failed 3");  \
 static_assert(ABS(hpm_to_sps(VAL) - slow_hpm_to_sps(VAL)) \
-<= static_cast<i32>(round_to_nearest(HPM_TO_SPS_RATIO+1.0/2)), "Step conversion failed 4");  \
+<= static_cast<i32>(round_to_nearest(HPM_TO_SPS_RATIO)), "Step conversion failed 4");  \
 
 TEST_SPEED_CONVERSIONS_WITH_VAL(489000)
 TEST_SPEED_CONVERSIONS_WITH_VAL(489)
