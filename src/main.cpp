@@ -227,7 +227,8 @@ int main() {
         mb.Coil(ERROR_OFFSET, machine_state == State::ERROR_STATE);
         const bool job_sr_active = (machine_state == State::JOB_START_SR
                                     || machine_state == State::JOB_WAIT_SR_START
-                                    || machine_state == State::JOB_WAIT_SR_FINISH);
+                                    || machine_state == State::JOB_WAIT_SR_FINISH
+                                    || machine_state == State::JOB_WAIT_SR_COOLDOWN);
         const bool job_moving = (machine_state == State::JOB_CALC_NEXT_POSITION
                                  || machine_state == State::JOB_MOVE_NEXT_POSITION
                                  || machine_state == State::JOB_WAIT_POSITION);
@@ -498,9 +499,11 @@ State state_machine_iter(const State state_in) {
         case State::MANUAL_EXECUTE_SR: {
             mb.Coil(PROGRAM_SELECT_OFFSET, true);
             const u16 station_idx = mb.Hreg(SELECTED_STATION_OFFSET);
-            PRINT("Executing manual SR #");
+            PRINT("Executing manual SR from station #");
             PRINTLN(station_idx);
             manual_sr_index = mb.Hreg(SUBROUTINE_OFFSET + station_idx);
+            PRINT("SR IDX: ");
+            PRINTLN(manual_sr_index);
             mb.Hreg(CURRENT_SUBROUTINE_OFFSET) = manual_sr_index;
             mb.Coil(ARM_ENABLE_OFFSET, true);
             sr_start_timeout = 1000;
