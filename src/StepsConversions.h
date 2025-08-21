@@ -107,20 +107,16 @@ static constexpr i32 slow_hpm_to_sps(const i32 hundreths_per_minute) {
 }
 
 #define TEST_DIST_CONVERSIONS_WITH_VAL(VAL) \
-static_assert(steps_to_hundreths(hundreths_to_steps(VAL)) == VAL, "Step conversion failed"); \
-static_assert(ABS(hundreths_to_steps(steps_to_hundreths(VAL)) - VAL)<=static_cast<i32>(round_to_nearest(HTS_RATIO/2)), "Step conversion failed"); \
-static_assert(steps_to_hundreths(VAL) == slow_steps_to_hundreths(VAL), "Step conversion failed"); \
-static_assert(hundreths_to_steps(VAL) == slow_hundreths_to_steps(VAL), "Step conversion failed");
+static_assert(ABS(steps_to_hundreths(hundreths_to_steps(VAL)) - VAL) <= round_to_nearest((1/HTS_RATIO)/2), "Step conversion failed"); \
+static_assert(ABS(hundreths_to_steps(steps_to_hundreths(VAL)) - VAL) <= round_to_nearest(HTS_RATIO/2), "Step conversion failed"); \
+static_assert(ABS(steps_to_hundreths(VAL) - slow_steps_to_hundreths(VAL)) <= 0, "Step conversion failed"); \
+static_assert(ABS(hundreths_to_steps(VAL) - slow_hundreths_to_steps(VAL)) <= 0, "Step conversion failed");
 
 #define TEST_SPEED_CONVERSIONS_WITH_VAL(VAL) \
-static_assert(ABS(sps_to_hpm(hpm_to_sps(VAL)) - VAL) \
-<= 1, "Step conversion failed 1");  \
-static_assert(ABS(hpm_to_sps(sps_to_hpm(VAL)) - VAL) \
-    <= static_cast<i32>(round_to_nearest(HPM_TO_SPS_RATIO)), "Step conversion failed 2");  \
-static_assert(ABS(sps_to_hpm(VAL) - slow_sps_to_hpm(VAL)) \
-<= static_cast<i32>((HPM_TO_SPS_RATIO)), "Step conversion failed 3");  \
-static_assert(ABS(hpm_to_sps(VAL) - slow_hpm_to_sps(VAL)) \
-<= static_cast<i32>(round_to_nearest(HPM_TO_SPS_RATIO)), "Step conversion failed 4");  \
+static_assert(ABS(sps_to_hpm(hpm_to_sps(VAL)) - VAL) <= round_to_nearest((1/HPM_TO_SPS_RATIO)/2), "Step conversion failed 1");  \
+static_assert(ABS(hpm_to_sps(sps_to_hpm(VAL)) - VAL) <= round_to_nearest(HPM_TO_SPS_RATIO/2), "Step conversion failed 2");  \
+static_assert(ABS(sps_to_hpm(VAL) - slow_sps_to_hpm(VAL)) <= 0, "Step conversion failed 3");  \
+static_assert(ABS(hpm_to_sps(VAL) - slow_hpm_to_sps(VAL)) <= 0, "Step conversion failed 4");
 
 TEST_SPEED_CONVERSIONS_WITH_VAL(489000)
 TEST_SPEED_CONVERSIONS_WITH_VAL(489)
