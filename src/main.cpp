@@ -124,8 +124,6 @@ static constexpr i32 MOTOR_HOMING_VEL_SPS = hpm_to_sps(MOTOR_HOMING_VEL_HPM);
 // in steps per second squared
 static constexpr i32 MOTOR_MAX_ACC = 10000;  // 100k on ctu
 
-// TODO: fix steps conversion functions
-
 static constexpr i32 START_POS_HUNDRETHS = 100;
 static constexpr i32 START_POS_STEPS = hundreths_to_steps(START_POS_HUNDRETHS);
 
