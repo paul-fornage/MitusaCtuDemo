@@ -498,6 +498,8 @@ State state_machine_iter(const State state_in) {
         case State::MANUAL_EXECUTE_SR: {
             mb.Coil(PROGRAM_SELECT_OFFSET, true);
             const u16 station_idx = mb.Hreg(SELECTED_STATION_OFFSET);
+            PRINT("Executing manual SR #");
+            PRINTLN(station_idx);
             manual_sr_index = mb.Hreg(SUBROUTINE_OFFSET + station_idx);
             mb.Hreg(CURRENT_SUBROUTINE_OFFSET) = manual_sr_index;
             mb.Coil(ARM_ENABLE_OFFSET, true);
@@ -529,7 +531,7 @@ State state_machine_iter(const State state_in) {
         }
         case State::MANUAL_EXECUTE_SR_WAIT_FINISH: {
             if (manual_sr_cancel_latched) {
-                PRINTLN("Stop manual SR");
+                PRINTLN("Stop manual SR. Setting enable to false and waiting 1 second");
                 mb.Coil(ARM_ENABLE_OFFSET, false);
                 stop_sr_delay = 1000;
                 return State::STOP_SR_DELAY;
@@ -540,7 +542,7 @@ State state_machine_iter(const State state_in) {
                 return State::IDLE;
             }
             if (sr_finish_timeout == 0) {
-                PRINTLN("SR finish timeout. Arm is not responding");
+                PRINTLN("SR finish timeout. Arm has reported running for 60 seconds. Stopping SR and calling ESTOP");
                 mb.Coil(ARM_ENABLE_OFFSET, false);
                 estop(); // arm is unresponsive and preports to be moving
                 return State::ERROR_STATE;
@@ -659,12 +661,13 @@ State state_machine_iter(const State state_in) {
         case State::JOB_START_SR: {
             if (stop_cycle_latched) {
                 PRINTLN("Stopping cycle");
-                mb.Coil(PROGRAM_SELECT_OFFSET, false);
                 return State::IDLE;
             }
             mb.Coil(PROGRAM_SELECT_OFFSET, true);
             sr_start_timeout = 1000;
             const u16 sr_index = mb.Hreg(SUBROUTINE_OFFSET + cycle_target_index);
+            PRINT("Executing SR #");
+            PRINTLN(sr_index);
             mb.Hreg(CURRENT_SUBROUTINE_OFFSET) = sr_index;
             mb.Coil(ARM_ENABLE_OFFSET, true);
             return State::JOB_WAIT_SR_START;
