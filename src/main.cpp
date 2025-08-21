@@ -117,14 +117,14 @@ enum class State : u16{
 };
 
 
-static constexpr i32 MOTOR_MAX_VEL_HPM = 5000;
+static constexpr i32 MOTOR_MAX_VEL_HPM = 50000;
 static constexpr i32 MOTOR_MAX_VEL_SPS = hpm_to_sps(MOTOR_MAX_VEL_HPM);
 
-static constexpr i32 MOTOR_HOMING_VEL_HPM = 2000;
+static constexpr i32 MOTOR_HOMING_VEL_HPM = 5000;
 static constexpr i32 MOTOR_HOMING_VEL_SPS = hpm_to_sps(MOTOR_HOMING_VEL_HPM);
 
 // in steps per second squared
-static constexpr i32 MOTOR_MAX_ACC = 10000;  // 100k on ctu
+static constexpr i32 MOTOR_MAX_ACC = 20000;  // 100k on ctu
 
 static constexpr i32 START_POS_HUNDRETHS = 100;
 static constexpr i32 START_POS_STEPS = hundreths_to_steps(START_POS_HUNDRETHS);
@@ -132,7 +132,7 @@ static constexpr i32 START_POS_STEPS = hundreths_to_steps(START_POS_HUNDRETHS);
 static constexpr i32 MOTOR_MAX_POS_HUNDRETHS = 24000;  // 4.37 inches on slide, 24000 inches on ctu
 static constexpr i32 MOTOR_MAX_POS_STEPS = hundreths_to_steps(MOTOR_MAX_POS_HUNDRETHS);
 
-static constexpr i32 DEFAULT_MOTOR_VEL_HPM = 1000;
+static constexpr i32 DEFAULT_MOTOR_VEL_HPM = 10000;
 
 bool is_homed = false;
 bool in_estop = false;
