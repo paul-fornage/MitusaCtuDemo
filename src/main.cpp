@@ -123,8 +123,8 @@ static constexpr i32 MOTOR_MAX_VEL_SPS = hpm_to_sps(MOTOR_MAX_VEL_HPM);
 static constexpr i32 MOTOR_HOMING_VEL_HPM = 5000;
 static constexpr i32 MOTOR_HOMING_VEL_SPS = hpm_to_sps(MOTOR_HOMING_VEL_HPM);
 
-// in steps per second squared
-static constexpr i32 MOTOR_MAX_ACC = 20000;  // 100k on ctu
+static constexpr i32 MOTOR_MAX_ACC = 20000; // in steps per second squared
+static constexpr i32 MOTOR_ESTOP_MAX_ACC = 100000; // in steps per second squared
 
 static constexpr i32 START_POS_HUNDRETHS = 100;
 static constexpr i32 START_POS_STEPS = hundreths_to_steps(START_POS_HUNDRETHS);
@@ -219,6 +219,7 @@ int main() {
     CARRIAGE_MOTOR.HlfbCarrier(MotorDriver::HLFB_CARRIER_482_HZ);
 
     CARRIAGE_MOTOR.AccelMax(MOTOR_MAX_ACC);
+    CARRIAGE_MOTOR.EStopDecelMax(MOTOR_ESTOP_MAX_ACC);
     CARRIAGE_MOTOR.VelMax(MOTOR_MAX_VEL_SPS);
 
     mb.Hreg(SPEED_OFFSET) = DEFAULT_MOTOR_VEL_HPM;
@@ -381,7 +382,7 @@ State state_machine_iter(const State state_in) {
         case State::WAIT_FOR_HOMING: {
             if (CARRIAGE_MOTOR.HlfbState() == MotorDriver::HLFB_ASSERTED) {
                 PRINTLN("Motor homed");
-                CARRIAGE_MOTOR.MoveStopAbrupt();
+                CARRIAGE_MOTOR.MoveStopDecel();
                 CARRIAGE_MOTOR.PositionRefSet(0);
                 is_homed = true;
                 return State::RETURN_TO_START;
@@ -425,7 +426,7 @@ State state_machine_iter(const State state_in) {
                     } else {
                         // this can sometimes trigger when going to start pos of 0,
                         // but stopping there is the desired behavior anyway
-                        CARRIAGE_MOTOR.MoveStopAbrupt();
+                        CARRIAGE_MOTOR.MoveStopDecel();
                         PRINTLN("Motor returned to start, but start is further out of bounds than the current position");
                         return State::IDLE;
                     }
@@ -435,7 +436,7 @@ State state_machine_iter(const State state_in) {
                         // currently out of bounds, but going back in. this is ok.
                         return State::WAIT_FOR_RETURN_TO_START;
                     } else {
-                        CARRIAGE_MOTOR.MoveStopAbrupt();
+                        CARRIAGE_MOTOR.MoveStopDecel();
                         PRINTLN("Motor returned to start, but start is further out of bounds than the current position");
                         return State::IDLE;
                     }
@@ -484,7 +485,7 @@ State state_machine_iter(const State state_in) {
                     } else {
                         // this can sometimes trigger when going to start pos of 0,
                         // but stopping there is the desired behavior anyway
-                        CARRIAGE_MOTOR.MoveStopAbrupt();
+                        CARRIAGE_MOTOR.MoveStopDecel();
                         PRINTLN("Motor returned to start, but start is further out of bounds than the current position");
                         return State::IDLE;
                     }
@@ -494,7 +495,7 @@ State state_machine_iter(const State state_in) {
                         // currently out of bounds, but going back in. this is ok.
                         return State::MANUAL_GO_TO_POSITION_WAIT;
                     } else {
-                        CARRIAGE_MOTOR.MoveStopAbrupt();
+                        CARRIAGE_MOTOR.MoveStopDecel();
                         PRINTLN("Motor returned to start, but start is further out of bounds than the current position");
                         return State::IDLE;
                     }
@@ -629,7 +630,7 @@ State state_machine_iter(const State state_in) {
 
         case State::JOB_WAIT_POSITION: {
             if (stop_cycle_latched) {
-                CARRIAGE_MOTOR.MoveStopAbrupt();
+                CARRIAGE_MOTOR.MoveStopDecel();
                 PRINTLN("Stopping cycle");
                 return State::IDLE;
             }
@@ -655,7 +656,7 @@ State state_machine_iter(const State state_in) {
                     } else {
                         // this can sometimes trigger when going to start pos of 0,
                         // but stopping there is the desired behavior anyway
-                        CARRIAGE_MOTOR.MoveStopAbrupt();
+                        CARRIAGE_MOTOR.MoveStopDecel();
                         PRINTLN("Motor OUT_OF_BOUNDS_NEGATIVE on job, but target is further out of bounds than the current position");
                         return State::IDLE;
                     }
@@ -665,7 +666,7 @@ State state_machine_iter(const State state_in) {
                         // currently out of bounds, but going back in. this is ok.
                         return State::JOB_WAIT_POSITION;
                     } else {
-                        CARRIAGE_MOTOR.MoveStopAbrupt();
+                        CARRIAGE_MOTOR.MoveStopDecel();
                         PRINTLN("Motor OUT_OF_BOUNDS_POSITIVE on job, but target is further out of bounds than the current position");
                         return State::IDLE;
                     }
@@ -798,7 +799,7 @@ State state_machine_iter(const State state_in) {
         case State::ERROR_STATE: {
             if (!in_estop) {
                 in_estop = true;
-                CARRIAGE_MOTOR.MoveStopAbrupt();
+                CARRIAGE_MOTOR.MoveStopDecel();
             }
             return State::ERROR_STATE;
         }
@@ -861,7 +862,7 @@ void estop() {
     machine_state = State::ESTOP_START;
     mb.Coil(ARM_ENABLE_OFFSET, false);
     mb.Coil(PROGRAM_SELECT_OFFSET, false);
-    CARRIAGE_MOTOR.MoveStopAbrupt();
+    CARRIAGE_MOTOR.MoveStopDecel();
 }
 
 void set_estop_out(bool new_state){
