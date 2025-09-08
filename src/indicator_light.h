@@ -6,7 +6,7 @@
 
 #ifndef INDICATOR_LIGHT_H
 #define INDICATOR_LIGHT_H
-#include "clearcore.h"
+#include "ClearCore.h"
 
 
 enum class LightPattern {
