@@ -151,10 +151,15 @@ i32 job_target_steps = 0;
 u16 speed = 0;
 u16 manual_sr_index = 0;
 volatile u32 stop_sr_delay = 0;
+static constexpr u32 CONST_STOP_SR_DELAY = 1000;
 volatile u32 sr_start_timeout = 0;
+static constexpr u32 CONST_SR_START_TIMEOUT = 2000;
 volatile u32 sr_finish_timeout = 0;
+static constexpr u32 CONST_SR_FINISH_TIMEOUT = 60000;
 volatile u32 sr_cooldown_timeout = 0;
+static constexpr u32 CONST_SR_COOLDOWN_TIMEOUT = 500;
 volatile u32 start_settle_timeout = 0;
+static constexpr u32 CONST_START_SETTLE_TIMEOUT = 500;
 
 ModBussy mb(502, coils, discretes, holding, input);
 
@@ -520,13 +525,13 @@ State state_machine_iter(const State state_in) {
             PRINT("SR IDX: ");
             PRINTLN(manual_sr_index);
             mb.Hreg(CURRENT_SUBROUTINE_OFFSET) = manual_sr_index;
-            start_settle_timeout = 200;
+            start_settle_timeout = CONST_START_SETTLE_TIMEOUT;
             return State::MANUAL_EXECUTE_SR_START_SETTLE;
         }
         case State::MANUAL_EXECUTE_SR_START_SETTLE: {
             if(start_settle_timeout == 0) {
                 mb.Coil(ARM_ENABLE_OFFSET, true);
-                sr_start_timeout = 1000;
+                sr_start_timeout = CONST_SR_START_TIMEOUT;
                 return State::MANUAL_EXECUTE_SR_WAIT_START;
             }
             return State::MANUAL_EXECUTE_SR_START_SETTLE;
@@ -534,7 +539,7 @@ State state_machine_iter(const State state_in) {
         case State::MANUAL_EXECUTE_SR_WAIT_START: {
             if (mb.Coil(ARM_RUNNING_OFFSET)) {
                 PRINTLN("Arm confirms job");
-                sr_finish_timeout = 60000;
+                sr_finish_timeout = CONST_SR_FINISH_TIMEOUT;
                 mb.Coil(PROGRAM_SELECT_OFFSET, false);
                 return State::MANUAL_EXECUTE_SR_WAIT_FINISH;
             }
@@ -542,14 +547,14 @@ State state_machine_iter(const State state_in) {
                 PRINTLN("SR start timeout. Arm is not responding");
                 mb.Coil(ARM_ENABLE_OFFSET, false);
                 mb.Coil(PROGRAM_SELECT_OFFSET, false);
-                stop_sr_delay = 1000;
+                stop_sr_delay = CONST_STOP_SR_DELAY;
                 return State::STOP_SR_DELAY;
             }
             if (manual_sr_cancel_latched) {
                 PRINTLN("SR cancel latched while waiting for arm to confirm receipt of SR. Stopping SR");
                 mb.Coil(ARM_ENABLE_OFFSET, false);
                 mb.Coil(PROGRAM_SELECT_OFFSET, false);
-                stop_sr_delay = 1000;
+                stop_sr_delay = CONST_STOP_SR_DELAY;
                 return State::STOP_SR_DELAY;
             }
             return State::MANUAL_EXECUTE_SR_WAIT_START;
@@ -558,7 +563,7 @@ State state_machine_iter(const State state_in) {
             if (manual_sr_cancel_latched) {
                 PRINTLN("Stop manual SR. Setting enable to false and waiting 1 second");
                 mb.Coil(ARM_ENABLE_OFFSET, false);
-                stop_sr_delay = 1000;
+                stop_sr_delay = CONST_STOP_SR_DELAY;
                 return State::STOP_SR_DELAY;
             }
             if (!mb.Coil(ARM_RUNNING_OFFSET)) {
@@ -693,13 +698,13 @@ State state_machine_iter(const State state_in) {
             PRINT("Executing SR #");
             PRINTLN(sr_index);
             mb.Hreg(CURRENT_SUBROUTINE_OFFSET) = sr_index;
-            start_settle_timeout = 200;
+            start_settle_timeout = CONST_START_SETTLE_TIMEOUT;
             return State::JOB_START_SR_SETTLE;
         }
 
         case State::JOB_START_SR_SETTLE: {
             if(start_settle_timeout == 0) {
-                sr_start_timeout = 1000;
+                sr_start_timeout = CONST_SR_START_TIMEOUT;
                 mb.Coil(ARM_ENABLE_OFFSET, true);
                 return State::JOB_WAIT_SR_START;
             }
@@ -711,20 +716,20 @@ State state_machine_iter(const State state_in) {
                 PRINTLN("Stopping cycle");
                 mb.Coil(ARM_ENABLE_OFFSET, false);
                 mb.Coil(PROGRAM_SELECT_OFFSET, false);
-                stop_sr_delay = 1000;
+                stop_sr_delay = CONST_STOP_SR_DELAY;
                 return State::STOP_SR_DELAY;
             }
             if (mb.Coil(ARM_RUNNING_OFFSET)) {
                 PRINTLN("Arm confirms job");
                 mb.Coil(PROGRAM_SELECT_OFFSET, false);
-                sr_finish_timeout = 60000;
+                sr_finish_timeout = CONST_SR_FINISH_TIMEOUT;
                 return State::JOB_WAIT_SR_FINISH;
             }
             if (sr_start_timeout == 0) {
                 PRINTLN("SR start timeout. Arm is not responding");
                 mb.Coil(ARM_ENABLE_OFFSET, false);
                 mb.Coil(PROGRAM_SELECT_OFFSET, false);
-                stop_sr_delay = 1000;
+                stop_sr_delay = CONST_STOP_SR_DELAY;
                 return State::STOP_SR_DELAY;
             }
             return State::JOB_WAIT_SR_START;
@@ -734,20 +739,20 @@ State state_machine_iter(const State state_in) {
             if(stop_cycle_latched) {
                 PRINTLN("Stopping cycle");
                 mb.Coil(ARM_ENABLE_OFFSET, false);
-                stop_sr_delay = 1000;
+                stop_sr_delay = CONST_STOP_SR_DELAY;
                 return State::STOP_SR_DELAY;
             }
             if (!mb.Coil(ARM_RUNNING_OFFSET)) {
                 PRINTLN("SR finished move, moving to cooldown");
                 mb.Coil(ARM_ENABLE_OFFSET, false);
                 cycle_last_index = cycle_target_index;
-                sr_cooldown_timeout = 200;
+                sr_cooldown_timeout = CONST_SR_COOLDOWN_TIMEOUT;
                 return State::JOB_WAIT_SR_COOLDOWN;
             }
             if(sr_finish_timeout == 0){
                 PRINTLN("SR finish timeout. Arm is not responding");
                 mb.Coil(ARM_ENABLE_OFFSET, false);
-                stop_sr_delay = 1000;
+                stop_sr_delay = CONST_STOP_SR_DELAY;
                 return State::STOP_SR_DELAY;
             }
             return State::JOB_WAIT_SR_FINISH;
