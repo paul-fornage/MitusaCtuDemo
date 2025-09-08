@@ -413,6 +413,7 @@ State state_machine_iter(const State state_in) {
                 }
                 case MotorWaitResult::ERROR: {
                     PRINTLN("Motor error during return to start");
+                    print_motor_alerts(CARRIAGE_MOTOR);
                     estop();
                     return State::ERROR_STATE;
                 }
@@ -471,7 +472,8 @@ State state_machine_iter(const State state_in) {
                     return State::IDLE;
                 }
                 case MotorWaitResult::ERROR: {
-                    PRINTLN("Motor error during return to start");
+                    PRINTLN("Motor error during got to manual position");
+                    print_motor_alerts(CARRIAGE_MOTOR);
                     estop();
                     return State::ERROR_STATE;
                 }
