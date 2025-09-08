@@ -372,8 +372,15 @@ State state_machine_iter(const State state_in) {
         case State::START_HOMING: {
             CARRIAGE_MOTOR.EnableRequest(false);
             delay(50);
+            PRINTLN("Starting homing, Set motor enable low");
+            PRINTLN("50ms after setting en low:");
+            PRINT("(CARRIAGE_MOTOR.HlfbState() == MotorDriver::HLFB_ASSERTED) = ");
+            PRINTLN((CARRIAGE_MOTOR.HlfbState() == MotorDriver::HLFB_ASSERTED)?"TRUE":"FALSE");
             CARRIAGE_MOTOR.EnableRequest(true);
             delay(50);
+            PRINTLN("50ms after re-enable");
+            PRINT("(CARRIAGE_MOTOR.HlfbState() == MotorDriver::HLFB_ASSERTED) = ");
+            PRINTLN((CARRIAGE_MOTOR.HlfbState() == MotorDriver::HLFB_ASSERTED)?"TRUE":"FALSE");
             CARRIAGE_MOTOR.PositionRefSet(0);
             CARRIAGE_MOTOR.MoveVelocity(-MOTOR_HOMING_VEL_SPS);
             delay(50);
