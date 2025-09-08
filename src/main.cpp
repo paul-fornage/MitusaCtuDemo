@@ -151,15 +151,15 @@ i32 job_target_steps = 0;
 u16 speed = 0;
 u16 manual_sr_index = 0;
 volatile u32 stop_sr_delay = 0;
-static constexpr u32 CONST_STOP_SR_DELAY = 1000;
+static constexpr u32 CONST_STOP_SR_DELAY = 10000;
 volatile u32 sr_start_timeout = 0;
-static constexpr u32 CONST_SR_START_TIMEOUT = 2000;
+static constexpr u32 CONST_SR_START_TIMEOUT = 20000;
 volatile u32 sr_finish_timeout = 0;
-static constexpr u32 CONST_SR_FINISH_TIMEOUT = 60000;
+static constexpr u32 CONST_SR_FINISH_TIMEOUT = 600000;
 volatile u32 sr_cooldown_timeout = 0;
-static constexpr u32 CONST_SR_COOLDOWN_TIMEOUT = 500;
+static constexpr u32 CONST_SR_COOLDOWN_TIMEOUT = 5000;
 volatile u32 start_settle_timeout = 0;
-static constexpr u32 CONST_START_SETTLE_TIMEOUT = 500;
+static constexpr u32 CONST_START_SETTLE_TIMEOUT = 5000;
 
 ModBussy mb(502, coils, discretes, holding, input);
 
